@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Marcador — Sport Bar Manager</title>
+<title>SportBar</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#12181A">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Marcador">
+<meta name="apple-mobile-web-app-title" content="SportBar">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
@@ -299,7 +299,7 @@
   <div id="main">
     <div id="content-topbar">
       <div>
-        <h2 id="brand-name">Marcador</h2>
+        <h2 id="brand-name">SportBar</h2>
         <div class="biz-name">Sport Bar Manager</div>
       </div>
       <div id="clock"></div>
@@ -711,7 +711,7 @@
     <div class="modal-body">
       <div class="form-field" style="margin-bottom:14px;">
         <label>Nombre del negocio</label>
-        <input type="text" id="settings-name" placeholder="Marcador">
+        <input type="text" id="settings-name" placeholder="SportBar">
       </div>
       <div class="form-field" style="margin-bottom:14px;">
         <label>NIT</label>
@@ -900,7 +900,7 @@
   }
 
   function addPdfHeader(doc, subtitle){
-    const name = settings.businessName || 'Marcador';
+    const name = settings.businessName || 'SportBar';
     let y = 18;
     let textX = 14;
     if(settings.logoDataUrl){
@@ -1059,7 +1059,7 @@
   let outages = [];
   let pendingAccounts = [];
   let offers = [];
-  let settings = { businessName:'Marcador', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
+  let settings = { businessName:'SportBar', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
   let movements = [];
   let incomeDraftLines = [];
   let outageDraftLines = [];
@@ -1192,7 +1192,7 @@
   async function saveSettings(){ try{ await window.storage.set('settings', JSON.stringify(settings), false); }catch(e){} }
 
   function applySettings(){
-    document.getElementById('brand-name').textContent = settings.businessName || 'Marcador';
+    document.getElementById('brand-name').textContent = settings.businessName || 'SportBar';
     const logo = document.getElementById('brand-logo');
     const dot = document.getElementById('brand-dot');
     if(settings.logoDataUrl){
@@ -1252,7 +1252,7 @@
       try{ const r = await window.storage.get(key); data[key] = r ? JSON.parse(r.value) : null; }
       catch(e){ data[key] = null; }
     }
-    data._backupInfo = { app:'Marcador', generatedAt: new Date().toISOString() };
+    data._backupInfo = { app:'SportBar', generatedAt: new Date().toISOString() };
     return JSON.stringify(data, null, 2);
   }
 
@@ -1327,13 +1327,13 @@
       const text = await file.text();
       parsed = JSON.parse(text);
     }catch(err){
-      await showAlert('El archivo no es un respaldo válido de Marcador (no se pudo leer como JSON).');
+      await showAlert('El archivo no es un respaldo válido de SportBar (no se pudo leer como JSON).');
       return;
     }
 
     const foundKeys = BACKUP_KEYS.filter(k=> parsed[k] !== undefined);
     if(foundKeys.length===0 || !parsed._backupInfo){
-      await showAlert('El archivo no parece ser un respaldo válido de Marcador.');
+      await showAlert('El archivo no parece ser un respaldo válido de SportBar.');
       return;
     }
 
@@ -2387,7 +2387,7 @@
   });
 
   document.getElementById('btn-save-settings').addEventListener('click', async ()=>{
-    settings.businessName = document.getElementById('settings-name').value.trim() || 'Marcador';
+    settings.businessName = document.getElementById('settings-name').value.trim() || 'SportBar';
     settings.nit = document.getElementById('settings-nit').value.trim();
     settings.theme = document.getElementById('settings-theme').value;
     settings.fontSize = document.getElementById('settings-fontsize').value;

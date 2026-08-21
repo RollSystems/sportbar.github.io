@@ -1,6 +1,6 @@
 {
-  "name": "Marcador — Sport Bar Manager",
-  "short_name": "Marcador",
+  "name": "SportBar",
+  "short_name": "SportBar",
   "description": "Control de ventas, mesas e inventario para sport bar",
   "start_url": "./sport-bar-app.html",
   "scope": "./",
