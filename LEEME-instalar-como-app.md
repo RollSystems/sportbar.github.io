@@ -1,6 +1,6 @@
-# Marcador — Instalar como app en Android
+# SportBar — Instalar como app en Android
 
-Estos archivos convierten "Marcador" en una **PWA (Progressive Web App)**:
+Estos archivos convierten "SportBar" en una **PWA (Progressive Web App)**:
 se instala como un ícono en la pantalla de la tablet, abre a pantalla
 completa (sin barra del navegador) y sigue funcionando aunque se corte
 el internet momentáneamente.
@@ -28,7 +28,7 @@ worker ni el manifest). Cualquiera de estas opciones sirve:
 1. Abre Chrome en la tablet y entra a la URL donde subiste `sport-bar-app.html`.
 2. Chrome mostrará un aviso (o desde el menú ⋮ elige **"Instalar app"** /
    **"Agregar a pantalla de inicio"**).
-3. Confirma. Aparecerá el ícono de Marcador en el escritorio, y al abrirlo
+3. Confirma. Aparecerá el ícono de SportBar en el escritorio, y al abrirlo
    se ve como una app nativa, sin la barra del navegador.
 
 Con esto ya tienes el resultado que normalmente buscas con un `.apk`:
