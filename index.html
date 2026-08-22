@@ -13,6 +13,7 @@
 <meta name="apple-mobile-web-app-title" content="SportBar">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
   :root{
     --bg: #12181A;
@@ -775,6 +776,22 @@
       </div>
       <input type="file" id="restore-file-input" accept="application/json,.json" style="display:none;">
 
+      <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Base de datos (Supabase)</h3>
+      <div id="db-status" style="font-size:13px; margin-bottom:12px; padding:10px 14px; border-radius:10px; background:var(--surface-2);">Usando almacenamiento local de este dispositivo.</div>
+      <div class="form-field" style="margin-bottom:10px;">
+        <label>URL del proyecto</label>
+        <input type="text" id="db-url" placeholder="https://xxxxxxxx.supabase.co">
+      </div>
+      <div class="form-field" style="margin-bottom:12px;">
+        <label>Llave anon (public)</label>
+        <input type="text" id="db-anon-key" placeholder="eyJhbGciOiJI...">
+      </div>
+      <div style="display:flex; gap:10px;">
+        <button class="btn btn-primary" id="btn-db-connect" style="flex:1;">🔌 Conectar</button>
+        <button class="btn btn-ghost" id="btn-db-disconnect" style="flex:1;">Usar almacenamiento local</button>
+      </div>
+      <p style="font-size:12px; color:var(--text-dim); margin:10px 0 0 0;">Cada dispositivo que deba compartir los mismos datos necesita conectarse con esta misma URL y llave. Al conectar o desconectar, la app se recarga.</p>
+
       <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Empezar de cero</h3>
       <p style="font-size:12px; color:var(--text-dim); margin:0 0 12px 0;">Vacía los productos, mesas y puestos de barra para cargar tus propios datos desde cero. No toca ventas históricas, ofertas ni configuración. Recomendado: haz un respaldo antes.</p>
       <button class="btn btn-danger" id="btn-reset-catalog" style="width:100%;">🗑 Reiniciar productos, mesas y barra</button>
@@ -856,10 +873,64 @@
 (function(){
   "use strict";
 
+  // ---------- BASE DE DATOS (Supabase) ----------
+  // Config guardada localmente en ESTE dispositivo (no puede vivir en Supabase: se necesita
+  // antes de poder conectarse a Supabase). Cada dispositivo que use la misma app debe configurar
+  // aquí la misma URL y llave para compartir los mismos datos.
+  const SB_CONFIG_KEY = 'sportbar-supabase-config';
+  function getSupabaseConfig(){
+    try{ return JSON.parse(localStorage.getItem(SB_CONFIG_KEY) || 'null'); }catch(e){ return null; }
+  }
+  function saveSupabaseConfig(url, anonKey){
+    localStorage.setItem(SB_CONFIG_KEY, JSON.stringify({url, anonKey}));
+  }
+  function clearSupabaseConfig(){
+    localStorage.removeItem(SB_CONFIG_KEY);
+  }
+
+  function createSupabaseStorage(client){
+    const TABLE = 'kv_store';
+    return {
+      async get(key){
+        const { data, error } = await client.from(TABLE).select('value').eq('key', key).maybeSingle();
+        if(error) throw error;
+        if(!data) throw new Error('key not found: ' + key);
+        return { key, value: data.value, shared:false };
+      },
+      async set(key, value){
+        const { error } = await client.from(TABLE).upsert({ key, value, updated_at: new Date().toISOString() });
+        if(error) throw error;
+        return { key, value, shared:false };
+      },
+      async delete(key){
+        const { error } = await client.from(TABLE).delete().eq('key', key);
+        if(error) throw error;
+        return { key, deleted:true, shared:false };
+      },
+      async list(prefix){
+        let q = client.from(TABLE).select('key');
+        if(prefix) q = q.like('key', prefix+'%');
+        const { data, error } = await q;
+        if(error) throw error;
+        return { keys: (data||[]).map(r=>r.key), prefix, shared:false };
+      }
+    };
+  }
+
+  const sbConfig = getSupabaseConfig();
+  let usingSupabase = false;
+  if(sbConfig && sbConfig.url && sbConfig.anonKey && typeof window.supabase !== 'undefined'){
+    try{
+      const client = window.supabase.createClient(sbConfig.url, sbConfig.anonKey);
+      window.storage = createSupabaseStorage(client);
+      usingSupabase = true;
+    }catch(e){ /* config inválida: se sigue con el almacenamiento local de respaldo */ }
+  }
+
   // Fuera de Claude.ai (por ejemplo, en un servidor propio) window.storage no existe.
   // Este respaldo usa localStorage del navegador con la misma interfaz (get/set/delete/list),
   // para que la app guarde los datos igual dentro o fuera de Claude.ai.
-  if(!window.storage || typeof window.storage.get !== 'function'){
+  if(!usingSupabase && (!window.storage || typeof window.storage.get !== 'function')){
     const LS_PREFIX = 'marcador-app:';
     window.storage = {
       async get(key){
@@ -1363,6 +1434,55 @@
     renderReport();
     document.getElementById('settings-overlay').classList.remove('active');
     await showAlert('Respaldo restaurado correctamente.');
+  });
+
+  // ---------- BASE DE DATOS (Supabase) ----------
+  function updateDbStatus(){
+    const el = document.getElementById('db-status');
+    const cfg = getSupabaseConfig();
+    document.getElementById('db-url').value = cfg ? cfg.url : '';
+    document.getElementById('db-anon-key').value = cfg ? cfg.anonKey : '';
+    if(usingSupabase && cfg){
+      el.textContent = '✅ Conectada a Supabase: ' + cfg.url;
+      el.style.color = 'var(--turf-bright)';
+    } else {
+      el.textContent = 'Usando almacenamiento local de este dispositivo (sin base de datos compartida).';
+      el.style.color = 'var(--text-dim)';
+    }
+  }
+
+  document.getElementById('btn-db-connect').addEventListener('click', async ()=>{
+    const url = document.getElementById('db-url').value.trim();
+    const anonKey = document.getElementById('db-anon-key').value.trim();
+    if(!url || !anonKey){
+      await showAlert('Completa la URL del proyecto y la llave anon de Supabase.');
+      return;
+    }
+    if(typeof window.supabase === 'undefined'){
+      await showAlert('No se pudo cargar la librería de Supabase (revisa tu conexión a internet e inténtalo de nuevo).');
+      return;
+    }
+    const ok = await showConfirmDialog(
+      'La app se recargará y a partir de ahora usará esta base de datos. Si ya tenías datos guardados localmente, no se copian automáticamente — puedes usar "Restaurar desde archivo" después de conectar, con un respaldo hecho antes. ¿Continuar?',
+      {title:'Conectar base de datos', confirmLabel:'Sí, conectar', cancelLabel:'Cancelar'}
+    );
+    if(!ok) return;
+    saveSupabaseConfig(url, anonKey);
+    location.reload();
+  });
+
+  document.getElementById('btn-db-disconnect').addEventListener('click', async ()=>{
+    if(!getSupabaseConfig()){
+      await showAlert('Ya estás usando el almacenamiento local de este dispositivo.');
+      return;
+    }
+    const ok = await showConfirmDialog(
+      'Se desconectará esta base de datos y la app volverá a usar el almacenamiento local de este dispositivo. La app se recargará. ¿Continuar?',
+      {title:'Usar almacenamiento local', confirmLabel:'Sí, desconectar', cancelLabel:'Cancelar'}
+    );
+    if(!ok) return;
+    clearSupabaseConfig();
+    location.reload();
   });
 
   // ---------- EMPEZAR DE CERO (reiniciar catálogo) ----------
@@ -2363,6 +2483,7 @@
     document.getElementById('backup-time').value = settings.backup.time || '23:30';
     document.getElementById('backup-folder-label').textContent = backupFolderHandle ? ('Carpeta: ' + backupFolderHandle.name) : 'No configurada — se descargará como archivo';
     updateBackupLastLabel();
+    updateDbStatus();
     const previewWrap = document.getElementById('settings-logo-preview-wrap');
     if(settings.logoDataUrl){
       document.getElementById('settings-logo-preview').src = settings.logoDataUrl;
