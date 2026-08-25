@@ -293,6 +293,7 @@
       <button class="tab-btn" data-view="reportes" data-label="Reportes"><span class="tab-ic">📊</span>Reportes</button>
     </div>
     <div id="sidebar-bottom">
+      <button class="btn-icon" id="btn-logout" title="Cerrar sesión" style="width:38px; height:38px; font-size:16px; display:none;">🔒</button>
       <button class="btn-icon" id="btn-settings" title="Configuración" style="width:38px; height:38px; font-size:18px;">⚙</button>
     </div>
   </div>
@@ -869,6 +870,27 @@
   </div>
 </div>
 
+<!-- LOGIN (solo aparece cuando hay una base de datos Supabase conectada) -->
+<div class="overlay" id="login-overlay" style="z-index:500;">
+  <div class="modal" style="max-width:380px;">
+    <div class="modal-header"><h2>Iniciar sesión</h2></div>
+    <div class="modal-body">
+      <div class="form-field" style="margin-bottom:12px;">
+        <label>Correo</label>
+        <input type="email" id="login-email" placeholder="correo@negocio.com" autocomplete="username">
+      </div>
+      <div class="form-field">
+        <label>Contraseña</label>
+        <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <div id="login-error" style="color:var(--red); font-size:13px; min-height:18px; margin-top:10px;"></div>
+    </div>
+    <div class="modal-footer" style="justify-content:flex-end;">
+      <button class="btn btn-primary" id="btn-login-submit" style="width:100%;">Iniciar sesión</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
   "use strict";
@@ -919,10 +941,11 @@
 
   const sbConfig = getSupabaseConfig();
   let usingSupabase = false;
+  let supabaseClient = null;
   if(sbConfig && sbConfig.url && sbConfig.anonKey && typeof window.supabase !== 'undefined'){
     try{
-      const client = window.supabase.createClient(sbConfig.url, sbConfig.anonKey);
-      window.storage = createSupabaseStorage(client);
+      supabaseClient = window.supabase.createClient(sbConfig.url, sbConfig.anonKey);
+      window.storage = createSupabaseStorage(supabaseClient);
       usingSupabase = true;
     }catch(e){ /* config inválida: se sigue con el almacenamiento local de respaldo */ }
   }
@@ -1463,7 +1486,7 @@
       return;
     }
     const ok = await showConfirmDialog(
-      'La app se recargará y a partir de ahora usará esta base de datos. Si ya tenías datos guardados localmente, no se copian automáticamente — puedes usar "Restaurar desde archivo" después de conectar, con un respaldo hecho antes. ¿Continuar?',
+      'La app se recargará y pedirá iniciar sesión (correo y contraseña del usuario que creaste en Supabase → Authentication → Users). Si ya tenías datos guardados localmente, no se copian automáticamente — puedes usar "Restaurar desde archivo" después de iniciar sesión, con un respaldo hecho antes. ¿Continuar?',
       {title:'Conectar base de datos', confirmLabel:'Sí, conectar', cancelLabel:'Cancelar'}
     );
     if(!ok) return;
@@ -2910,7 +2933,68 @@
     populateKardexSelect();
     initBackup();
   }
-  init();
+
+  // ---------- INICIO DE SESIÓN (solo si hay base de datos Supabase conectada) ----------
+  function showLoginScreen(){
+    document.getElementById('login-error').textContent = '';
+    document.getElementById('login-password').value = '';
+    document.getElementById('login-overlay').classList.add('active');
+  }
+  function hideLoginScreen(){
+    document.getElementById('login-overlay').classList.remove('active');
+  }
+
+  document.getElementById('btn-login-submit').addEventListener('click', async ()=>{
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errEl = document.getElementById('login-error');
+    errEl.textContent = '';
+    if(!email || !password){ errEl.textContent = 'Completa correo y contraseña.'; return; }
+    try{
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if(error){ errEl.textContent = 'Correo o contraseña incorrectos.'; return; }
+      // onAuthStateChange (abajo) se encarga de ocultar la pantalla y arrancar la app
+    }catch(e){
+      errEl.textContent = 'No se pudo conectar. Revisa tu internet e inténtalo de nuevo.';
+    }
+  });
+
+  document.getElementById('btn-logout').addEventListener('click', async ()=>{
+    const ok = await showConfirmDialog('¿Cerrar sesión? Volverás a la pantalla de inicio de sesión.', {title:'Cerrar sesión', confirmLabel:'Sí, cerrar sesión'});
+    if(!ok) return;
+    await supabaseClient.auth.signOut();
+    location.reload();
+  });
+
+  let appStarted = false;
+  async function startAppOnce(){
+    if(appStarted) return;
+    appStarted = true;
+    await init();
+  }
+
+  if(usingSupabase){
+    document.getElementById('btn-logout').style.display = 'block';
+    supabaseClient.auth.onAuthStateChange((event, session)=>{
+      if(event === 'SIGNED_IN' && session){
+        hideLoginScreen();
+        startAppOnce();
+      }
+      if(event === 'SIGNED_OUT'){
+        showLoginScreen();
+      }
+    });
+    supabaseClient.auth.getSession().then(({data})=>{
+      if(data && data.session){
+        hideLoginScreen();
+        startAppOnce();
+      } else {
+        showLoginScreen();
+      }
+    }).catch(()=>{ showLoginScreen(); });
+  } else {
+    startAppOnce();
+  }
 })();
 </script>
 </body>
