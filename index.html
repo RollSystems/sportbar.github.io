@@ -949,6 +949,7 @@
       await fn();
       return true;
     }catch(e){
+      console.error('SportBar: falló una escritura a la base de datos, se encoló para reintentar. Detalle:', entry.kind, entry.table||entry.key, e);
       const q = loadOfflineQueueArr();
       q.push(entry);
       saveOfflineQueueArr(q);
@@ -972,7 +973,7 @@
     const remaining = [];
     for(const entry of q){
       try{ await runQueueEntry(entry); }
-      catch(e){ remaining.push(entry); }
+      catch(e){ console.error('SportBar: reintento de sincronización falló otra vez:', entry.kind, entry.table||entry.key, e); remaining.push(entry); }
     }
     saveOfflineQueueArr(remaining);
     updateOfflineIndicator();
