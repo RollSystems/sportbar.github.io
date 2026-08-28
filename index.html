@@ -304,7 +304,10 @@
         <h2 id="brand-name">SportBar</h2>
         <div class="biz-name">Sport Bar Manager</div>
       </div>
-      <div id="clock"></div>
+      <div style="text-align:right;">
+        <span id="offline-indicator" style="display:none; font-size:12px; color:var(--amber); margin-right:10px;"></span>
+        <div id="clock"></div>
+      </div>
     </div>
 
     <div id="view">
@@ -910,33 +913,178 @@
     localStorage.removeItem(SB_CONFIG_KEY);
   }
 
+  // businessId = el usuario que inició sesión (auth.uid()). Cada negocio que use el mismo
+  // proyecto de Supabase necesita su propio usuario — así se separan sus datos automáticamente.
+  let businessId = null;
+
+  // ---------- COLA OFFLINE ----------
+  // Si una escritura falla (sin internet), se guarda aquí para reintentarla cuando vuelva la conexión.
+  const OFFLINE_QUEUE_KEY = 'sportbar-offline-queue';
+  const OFFLINE_CACHE_KEY = 'sportbar-offline-cache';
+  function loadOfflineQueueArr(){ try{ return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]'); }catch(e){ return []; } }
+  function saveOfflineQueueArr(q){ try{ localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(q)); }catch(e){} }
+  function saveOfflineCache(){
+    try{
+      localStorage.setItem(OFFLINE_CACHE_KEY, JSON.stringify({
+        products, tables, sales, incomes, outages, pendingAccounts, offers, movements, settings
+      }));
+    }catch(e){}
+  }
+  function loadOfflineCache(){
+    try{ return JSON.parse(localStorage.getItem(OFFLINE_CACHE_KEY) || 'null'); }catch(e){ return null; }
+  }
+  function updateOfflineIndicator(){
+    const el = document.getElementById('offline-indicator');
+    if(!el) return;
+    const n = loadOfflineQueueArr().length;
+    if(n > 0){
+      el.style.display = 'inline';
+      el.textContent = '⏳ ' + n + ' sin sincronizar';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+  async function attemptOrQueue(entry, fn){
+    try{
+      await fn();
+      return true;
+    }catch(e){
+      const q = loadOfflineQueueArr();
+      q.push(entry);
+      saveOfflineQueueArr(q);
+      updateOfflineIndicator();
+      return false;
+    }
+  }
+  async function runQueueEntry(entry){
+    if(entry.kind === 'kv_set'){
+      const { error } = await supabaseClient.from('kv_store').upsert({ business_id: businessId, key: entry.key, value: entry.value, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    } else if(entry.kind === 'row_upsert'){
+      const { error } = await supabaseClient.from(entry.table).upsert(entry.row);
+      if(error) throw error;
+    }
+  }
+  async function flushOfflineQueue(){
+    if(!usingSupabase || !navigator.onLine) return;
+    const q = loadOfflineQueueArr();
+    if(q.length === 0) return;
+    const remaining = [];
+    for(const entry of q){
+      try{ await runQueueEntry(entry); }
+      catch(e){ remaining.push(entry); }
+    }
+    saveOfflineQueueArr(remaining);
+    updateOfflineIndicator();
+  }
+  window.addEventListener('online', flushOfflineQueue);
+  setInterval(flushOfflineQueue, 20000);
+
   function createSupabaseStorage(client){
     const TABLE = 'kv_store';
     return {
       async get(key){
-        const { data, error } = await client.from(TABLE).select('value').eq('key', key).maybeSingle();
+        const { data, error } = await client.from(TABLE).select('value').eq('business_id', businessId).eq('key', key).maybeSingle();
         if(error) throw error;
         if(!data) throw new Error('key not found: ' + key);
         return { key, value: data.value, shared:false };
       },
       async set(key, value){
-        const { error } = await client.from(TABLE).upsert({ key, value, updated_at: new Date().toISOString() });
-        if(error) throw error;
+        await attemptOrQueue({kind:'kv_set', key, value}, async ()=>{
+          const { error } = await client.from(TABLE).upsert({ business_id: businessId, key, value, updated_at: new Date().toISOString() });
+          if(error) throw error;
+        });
         return { key, value, shared:false };
       },
       async delete(key){
-        const { error } = await client.from(TABLE).delete().eq('key', key);
-        if(error) throw error;
+        try{
+          const { error } = await client.from(TABLE).delete().eq('business_id', businessId).eq('key', key);
+          if(error) throw error;
+        }catch(e){ /* fuera de línea: el borrado no es crítico, se omite el reintento */ }
         return { key, deleted:true, shared:false };
       },
       async list(prefix){
-        let q = client.from(TABLE).select('key');
+        let q = client.from(TABLE).select('key').eq('business_id', businessId);
         if(prefix) q = q.like('key', prefix+'%');
         const { data, error } = await q;
         if(error) throw error;
         return { keys: (data||[]).map(r=>r.key), prefix, shared:false };
       }
     };
+  }
+
+  // ---------- SINCRONIZACIÓN POR FILA (ventas, kardex, ingresos, salidas, cuentas por cobrar) ----------
+  // Cada colección se guarda como tabla real: cada registro nuevo solo sube esa fila,
+  // no el historial completo. syncSnapshots recuerda qué ya se envió, para no reenviarlo.
+  const syncSnapshots = { sales:{}, movements:{}, incomes:{}, outages:{}, pendingAccounts:{} };
+
+  const ROW_MAPPERS = {
+    sales: {
+      table: 'sales',
+      toRow: s => ({ id:s.id, business_id:businessId, date:s.date, time:s.time, table_id:s.tableId||null, table_name:s.tableName, items:s.items, total:s.total, payment_method:s.paymentMethod||null }),
+      fromRow: r => ({ id:r.id, date:r.date, time:r.time, tableId:r.table_id, tableName:r.table_name, items:r.items, total:Number(r.total), paymentMethod:r.payment_method })
+    },
+    movements: {
+      table: 'movements',
+      toRow: m => ({ id:m.id, business_id:businessId, ts:m.ts, date:m.date, product_id:m.productId, type:m.type, qty:m.qty, ref:m.ref }),
+      fromRow: r => ({ id:r.id, ts:Number(r.ts), date:r.date, productId:r.product_id, type:r.type, qty:Number(r.qty), ref:r.ref })
+    },
+    incomes: {
+      table: 'incomes',
+      toRow: i => ({ id:i.id, business_id:businessId, correlativo:i.correlativo, invoice:i.invoice, date:i.date, items:i.items }),
+      fromRow: r => ({ id:r.id, correlativo:r.correlativo, invoice:r.invoice, date:r.date, items:r.items })
+    },
+    outages: {
+      table: 'outages',
+      toRow: o => ({ id:o.id, business_id:businessId, correlativo:o.correlativo, reason:o.reason, date:o.date, items:o.items }),
+      fromRow: r => ({ id:r.id, correlativo:r.correlativo, reason:r.reason, date:r.date, items:r.items })
+    },
+    pendingAccounts: {
+      table: 'pending_accounts',
+      toRow: a => ({ id:a.id, business_id:businessId, date:a.date, ts:a.ts, table_name:a.tableName, client_name:a.clientName||null, total:a.total, items:a.items, status:a.status, payment_method:a.paymentMethod||null }),
+      fromRow: r => ({ id:r.id, date:r.date, ts:Number(r.ts), tableName:r.table_name, clientName:r.client_name, total:Number(r.total), items:r.items, status:r.status, paymentMethod:r.payment_method })
+    }
+  };
+
+  async function loadRowTable(snapshotKey){
+    const cfg = ROW_MAPPERS[snapshotKey];
+    const { data, error } = await supabaseClient.from(cfg.table).select('*').eq('business_id', businessId);
+    if(error) throw error;
+    const arr = (data||[]).map(cfg.fromRow);
+    syncSnapshots[snapshotKey] = {};
+    arr.forEach(item=>{ syncSnapshots[snapshotKey][item.id] = JSON.stringify(item); });
+    return arr;
+  }
+
+  async function syncRowTable(snapshotKey, arr){
+    const cfg = ROW_MAPPERS[snapshotKey];
+    const snap = syncSnapshots[snapshotKey] || (syncSnapshots[snapshotKey] = {});
+    for(const item of arr){
+      const s = JSON.stringify(item);
+      if(snap[item.id] === s) continue; // sin cambios desde la última sincronización
+      const row = cfg.toRow(item);
+      const ok = await attemptOrQueue({kind:'row_upsert', table:cfg.table, row}, async ()=>{
+        const { error } = await supabaseClient.from(cfg.table).upsert(row);
+        if(error) throw error;
+      });
+      if(ok) snap[item.id] = s;
+    }
+  }
+
+  // Usada solo al restaurar un respaldo: reemplaza el contenido completo de una tabla real
+  // (borra las filas que ya no estén en el respaldo, y sube/actualiza el resto).
+  async function restoreRowTable(snapshotKey, arr){
+    const cfg = ROW_MAPPERS[snapshotKey];
+    const keepIds = new Set(arr.map(i=>i.id));
+    try{
+      const { data } = await supabaseClient.from(cfg.table).select('id').eq('business_id', businessId);
+      const toDelete = (data||[]).map(r=>r.id).filter(id=>!keepIds.has(id));
+      if(toDelete.length){
+        await supabaseClient.from(cfg.table).delete().eq('business_id', businessId).in('id', toDelete);
+      }
+    }catch(e){ /* si falla el borrado de las filas sobrantes, se continúa igual con la carga del resto */ }
+    syncSnapshots[snapshotKey] = {}; // se fuerza a reenviar todo, como si fuera nuevo
+    await syncRowTable(snapshotKey, arr);
   }
 
   const sbConfig = getSupabaseConfig();
@@ -1143,7 +1291,11 @@
       return `${r.qty} ${tag} (${money(r.subtotal)})`;
     }).join(' + ');
   }
-  const todayStr = () => new Date().toISOString().slice(0,10);
+  const todayStr = () => {
+    const d = new Date();
+    const pad = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  };
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
   let products = [];
@@ -1164,6 +1316,27 @@
 
   // ---------- STORAGE ----------
   async function loadAll(){
+    // Si hay Supabase conectado pero no hay internet en este momento, se usa la última
+    // copia guardada en este dispositivo en vez de intentar (y fallar) la carga en línea.
+    if(usingSupabase && !navigator.onLine){
+      const cache = loadOfflineCache();
+      if(cache){
+        products = cache.products || [];
+        tables = cache.tables || [];
+        sales = cache.sales || [];
+        incomes = cache.incomes || [];
+        outages = cache.outages || [];
+        pendingAccounts = cache.pendingAccounts || [];
+        offers = cache.offers || [];
+        movements = cache.movements || [];
+        if(cache.settings) settings = Object.assign(settings, cache.settings);
+        storageReady = true;
+        return;
+      }
+      // sin caché todavía (primer uso de este dispositivo, sin haber cargado nunca en línea):
+      // se sigue de largo y se intentará igual (probablemente falle y quede todo vacío).
+    }
+
     try{
       const p = await window.storage.get('products');
       products = p ? JSON.parse(p.value) : [];
@@ -1172,22 +1345,36 @@
       const t = await window.storage.get('tables');
       tables = t ? JSON.parse(t.value) : [];
     }catch(e){ tables = []; }
-    try{
-      const s = await window.storage.get('sales');
-      sales = s ? JSON.parse(s.value) : [];
-    }catch(e){ sales = []; }
-    try{
-      const inc = await window.storage.get('incomes');
-      incomes = inc ? JSON.parse(inc.value) : [];
-    }catch(e){ incomes = []; }
-    try{
-      const out = await window.storage.get('outages');
-      outages = out ? JSON.parse(out.value) : [];
-    }catch(e){ outages = []; }
-    try{
-      const pa = await window.storage.get('pendingAccounts');
-      pendingAccounts = pa ? JSON.parse(pa.value) : [];
-    }catch(e){ pendingAccounts = []; }
+
+    if(usingSupabase){
+      try{ sales = await loadRowTable('sales'); }catch(e){ sales = []; }
+      try{ incomes = await loadRowTable('incomes'); }catch(e){ incomes = []; }
+      try{ outages = await loadRowTable('outages'); }catch(e){ outages = []; }
+      try{ pendingAccounts = await loadRowTable('pendingAccounts'); }catch(e){ pendingAccounts = []; }
+      try{ movements = await loadRowTable('movements'); }catch(e){ movements = []; }
+    } else {
+      try{
+        const s = await window.storage.get('sales');
+        sales = s ? JSON.parse(s.value) : [];
+      }catch(e){ sales = []; }
+      try{
+        const inc = await window.storage.get('incomes');
+        incomes = inc ? JSON.parse(inc.value) : [];
+      }catch(e){ incomes = []; }
+      try{
+        const out = await window.storage.get('outages');
+        outages = out ? JSON.parse(out.value) : [];
+      }catch(e){ outages = []; }
+      try{
+        const pa = await window.storage.get('pendingAccounts');
+        pendingAccounts = pa ? JSON.parse(pa.value) : [];
+      }catch(e){ pendingAccounts = []; }
+      try{
+        const mv = await window.storage.get('movements');
+        movements = mv ? JSON.parse(mv.value) : [];
+      }catch(e){ movements = []; }
+    }
+
     try{
       const of = await window.storage.get('offers');
       offers = of ? JSON.parse(of.value) : [];
@@ -1202,10 +1389,8 @@
         }
       }
     }catch(e){ /* keep defaults */ }
-    try{
-      const mv = await window.storage.get('movements');
-      movements = mv ? JSON.parse(mv.value) : [];
-    }catch(e){ movements = []; }
+
+    if(usingSupabase) saveOfflineCache();
 
     // Migraciones estructurales de mesas: siempre se ejecutan, sin importar si ya se sembró o no
     let migratedTables = false;
@@ -1282,14 +1467,26 @@
     }catch(e){ /* aún no existe la clave: no hay nada que recuperar */ }
   }
 
-  async function saveProducts(){ try{ await window.storage.set('products', JSON.stringify(products), false); }catch(e){} }
-  async function saveTables(){ try{ await window.storage.set('tables', JSON.stringify(tables), false); }catch(e){} }
-  async function saveSales(){ await resyncCollection('sales', sales); try{ await window.storage.set('sales', JSON.stringify(sales), false); }catch(e){} }
-  async function saveIncomes(){ await resyncCollection('incomes', incomes); try{ await window.storage.set('incomes', JSON.stringify(incomes), false); }catch(e){} }
-  async function saveOutages(){ await resyncCollection('outages', outages); try{ await window.storage.set('outages', JSON.stringify(outages), false); }catch(e){} }
-  async function savePendingAccounts(){ await resyncCollection('pendingAccounts', pendingAccounts); try{ await window.storage.set('pendingAccounts', JSON.stringify(pendingAccounts), false); }catch(e){} }
-  async function saveOffers(){ try{ await window.storage.set('offers', JSON.stringify(offers), false); }catch(e){} }
-  async function saveSettings(){ try{ await window.storage.set('settings', JSON.stringify(settings), false); }catch(e){} }
+  async function saveProducts(){ try{ await window.storage.set('products', JSON.stringify(products), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
+  async function saveTables(){ try{ await window.storage.set('tables', JSON.stringify(tables), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
+  async function saveSales(){
+    if(usingSupabase){ await syncRowTable('sales', sales); saveOfflineCache(); return; }
+    await resyncCollection('sales', sales); try{ await window.storage.set('sales', JSON.stringify(sales), false); }catch(e){}
+  }
+  async function saveIncomes(){
+    if(usingSupabase){ await syncRowTable('incomes', incomes); saveOfflineCache(); return; }
+    await resyncCollection('incomes', incomes); try{ await window.storage.set('incomes', JSON.stringify(incomes), false); }catch(e){}
+  }
+  async function saveOutages(){
+    if(usingSupabase){ await syncRowTable('outages', outages); saveOfflineCache(); return; }
+    await resyncCollection('outages', outages); try{ await window.storage.set('outages', JSON.stringify(outages), false); }catch(e){}
+  }
+  async function savePendingAccounts(){
+    if(usingSupabase){ await syncRowTable('pendingAccounts', pendingAccounts); saveOfflineCache(); return; }
+    await resyncCollection('pendingAccounts', pendingAccounts); try{ await window.storage.set('pendingAccounts', JSON.stringify(pendingAccounts), false); }catch(e){}
+  }
+  async function saveOffers(){ try{ await window.storage.set('offers', JSON.stringify(offers), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
+  async function saveSettings(){ try{ await window.storage.set('settings', JSON.stringify(settings), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
 
   function applySettings(){
     document.getElementById('brand-name').textContent = settings.businessName || 'SportBar';
@@ -1308,7 +1505,10 @@
     if(settings.theme==='contrast') document.body.classList.add('theme-contrast');
     document.body.classList.toggle('font-large', settings.fontSize==='large');
   }
-  async function saveMovements(){ try{ await window.storage.set('movements', JSON.stringify(movements), false); }catch(e){} }
+  async function saveMovements(){
+    if(usingSupabase){ await syncRowTable('movements', movements); saveOfflineCache(); return; }
+    try{ await window.storage.set('movements', JSON.stringify(movements), false); }catch(e){}
+  }
 
   // ---------- RESPALDO DE DATOS ----------
   const BACKUP_KEYS = ['products','tables','sales','incomes','outages','pendingAccounts','offers','movements','settings'];
@@ -1442,8 +1642,18 @@
     const ok = await showConfirmDialog(confirmMsg, {title:'Restaurar respaldo', confirmLabel:'Sí, restaurar todo', cancelLabel:'Cancelar'});
     if(!ok) return;
 
+    const ROW_KEYS = ['sales','incomes','outages','pendingAccounts','movements'];
+
     for(const key of foundKeys){
+      if(usingSupabase && ROW_KEYS.includes(key)) continue; // se manejan aparte abajo (tablas reales)
       try{ await window.storage.set(key, JSON.stringify(parsed[key]), false); }catch(err){ /* se continúa con las demás claves */ }
+    }
+    if(usingSupabase){
+      for(const key of ROW_KEYS){
+        if(parsed[key] !== undefined){
+          try{ await restoreRowTable(key, parsed[key]); }catch(err){ /* se continúa con las demás colecciones */ }
+        }
+      }
     }
 
     await loadAll();
@@ -2932,6 +3142,7 @@
     renderReport();
     populateKardexSelect();
     initBackup();
+    updateOfflineIndicator();
   }
 
   // ---------- INICIO DE SESIÓN (solo si hay base de datos Supabase conectada) ----------
@@ -2977,17 +3188,22 @@
     document.getElementById('btn-logout').style.display = 'block';
     supabaseClient.auth.onAuthStateChange((event, session)=>{
       if(event === 'SIGNED_IN' && session){
+        businessId = session.user.id;
         hideLoginScreen();
         startAppOnce();
+        flushOfflineQueue();
       }
       if(event === 'SIGNED_OUT'){
+        businessId = null;
         showLoginScreen();
       }
     });
     supabaseClient.auth.getSession().then(({data})=>{
       if(data && data.session){
+        businessId = data.session.user.id;
         hideLoginScreen();
         startAppOnce();
+        flushOfflineQueue();
       } else {
         showLoginScreen();
       }
