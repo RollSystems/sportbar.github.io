@@ -1685,10 +1685,15 @@
   }
 
   document.getElementById('btn-db-connect').addEventListener('click', async ()=>{
-    const url = document.getElementById('db-url').value.trim();
+    let url = document.getElementById('db-url').value.trim();
     const anonKey = document.getElementById('db-anon-key').value.trim();
     if(!url || !anonKey){
       await showAlert('Completa la URL del proyecto y la llave anon de Supabase.');
+      return;
+    }
+    url = url.replace(/\/+$/,''); // quita "/" al final si quedó pegado
+    if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)){
+      await showAlert('La URL no tiene el formato esperado. Debe verse exactamente así: https://tuproyecto.supabase.co (sin espacios, sin / al final, sin texto adicional). Cópiala desde Supabase → Settings → API → "Project URL".');
       return;
     }
     if(typeof window.supabase === 'undefined'){
