@@ -2087,7 +2087,7 @@
     document.getElementById('order-select-qty').value = 1;
   });
 
-  function changeOrderQty(productId, delta){
+  async function changeOrderQty(productId, delta){
     const t = tables.find(x=>x.id===activeTableId);
     const acc = getActiveAccount(t);
     const p = products.find(x=>x.id===productId);
@@ -2098,15 +2098,36 @@
       acc.order.push(line);
     }
     if(!line) return;
-    const newQty = line.qty + delta;
-    if(tracksStock(p) && newQty > p.stock) return;
-    line.qty = Math.max(0, newQty);
+    if(tracksStock(p) && delta>0 && delta > p.stock){
+      await showAlert(`No hay suficiente stock disponible de "${p.name}" (quedan ${p.stock}).`);
+      return;
+    }
+    line.qty = Math.max(0, line.qty + delta);
     acc.order = acc.order.filter(i=>i.qty>0);
+
+    // El inventario se descuenta (o se restablece si es una devolución con "-") al momento
+    // del cargo a la mesa, no cuando se cobra — así no se puede sobrevender entre varias mesas.
+    if(p && tracksStock(p) && delta!==0){
+      p.stock = Math.max(0, p.stock - delta);
+      const now = Date.now();
+      const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
+      const multi = t.accounts.length>1;
+      const label = multi ? `${t.name} (${acc.label})` : t.name;
+      if(delta>0){
+        movements.push({id:uid(), ts:now, date:dateStr, productId, type:'venta', qty:-delta, ref:'Despacho a '+label});
+      } else {
+        movements.push({id:uid(), ts:now, date:dateStr, productId, type:'devolucion', qty:-delta, ref:'Devolución en '+label});
+      }
+      await Promise.all([saveProducts(), saveMovements()]);
+      renderInventory();
+    }
+
     recomputeTableStatus(t);
     saveTables();
     populateOrderSelect();
     renderAccountTabs();
     renderOrderSummary();
+    renderDashboard();
   }
 
   function renderOrderSummary(){
@@ -2122,7 +2143,7 @@
       total += subtotal;
       const note = formatBreakdownNote(i);
       const p = products.find(x=>x.id===i.productId);
-      const plusDisabled = p && tracksStock(p) && p.stock<=i.qty;
+      const plusDisabled = p && tracksStock(p) && p.stock<=0;
       const d = document.createElement('div');
       d.className = 'order-line';
       d.innerHTML = `
@@ -2200,15 +2221,8 @@
     const paymentMethod = await showPaymentDialog(total);
     if(!paymentMethod) return;
 
-    const now = Date.now();
-    const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
-    acc.order.forEach(line=>{
-      const p = products.find(x=>x.id===line.productId);
-      if(p && tracksStock(p)){
-        p.stock = Math.max(0, p.stock - line.qty);
-        movements.push({id:uid(), ts:now, date:dateStr, productId:line.productId, type:'venta', qty:-line.qty, ref:'Despacho a '+label});
-      }
-    });
+    // El inventario ya se descontó al momento de agregar cada producto a la cuenta
+    // (ver changeOrderQty) — aquí solo se registra la venta/cobro, sin volver a tocar el stock.
     sales.push({
       id: uid(),
       date: todayStr(),
@@ -2227,7 +2241,7 @@
       acc.order = [];
     }
     recomputeTableStatus(t);
-    await Promise.all([saveTables(), saveProducts(), saveSales(), saveMovements()]);
+    await Promise.all([saveTables(), saveSales()]);
     refreshTableViews(); renderDashboard();
 
     if(t.status==='ocupada'){
@@ -2625,7 +2639,7 @@
     document.getElementById('quicksale-select-qty').value = 1;
   });
 
-  function changeQuickSaleQty(productId, delta){
+  async function changeQuickSaleQty(productId, delta){
     const p = products.find(x=>x.id===productId);
     let line = quickSaleCart.find(i=>i.productId===productId);
     if(!line && delta>0){
@@ -2633,10 +2647,27 @@
       quickSaleCart.push(line);
     }
     if(!line) return;
-    const newQty = line.qty + delta;
-    if(tracksStock(p) && newQty > p.stock) return;
-    line.qty = Math.max(0, newQty);
+    if(tracksStock(p) && delta>0 && delta > p.stock){
+      await showAlert(`No hay suficiente stock disponible de "${p.name}" (quedan ${p.stock}).`);
+      return;
+    }
+    line.qty = Math.max(0, line.qty + delta);
     quickSaleCart = quickSaleCart.filter(i=>i.qty>0);
+
+    if(p && tracksStock(p) && delta!==0){
+      p.stock = Math.max(0, p.stock - delta);
+      const now = Date.now();
+      const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
+      if(delta>0){
+        movements.push({id:uid(), ts:now, date:dateStr, productId, type:'venta', qty:-delta, ref:'Venta rápida en barra'});
+      } else {
+        movements.push({id:uid(), ts:now, date:dateStr, productId, type:'devolucion', qty:-delta, ref:'Devolución en venta rápida'});
+      }
+      await Promise.all([saveProducts(), saveMovements()]);
+      renderInventory();
+      renderDashboard();
+    }
+
     renderQuickSaleSummary();
   }
 
@@ -2650,7 +2681,7 @@
       total += subtotal;
       const note = formatBreakdownNote(i);
       const p = products.find(x=>x.id===i.productId);
-      const plusDisabled = p && tracksStock(p) && p.stock<=i.qty;
+      const plusDisabled = p && tracksStock(p) && p.stock<=0;
       const d = document.createElement('div');
       d.className = 'order-line';
       d.innerHTML = `
@@ -2672,9 +2703,22 @@
     document.getElementById('quicksale-total').textContent = money(total);
   }
 
-  document.getElementById('btn-quicksale-clear').addEventListener('click', ()=>{
+  document.getElementById('btn-quicksale-clear').addEventListener('click', async ()=>{
+    if(quickSaleCart.length===0) return;
+    const now = Date.now();
+    const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
+    quickSaleCart.forEach(line=>{
+      const p = products.find(x=>x.id===line.productId);
+      if(p && tracksStock(p)){
+        p.stock += line.qty;
+        movements.push({id:uid(), ts:now, date:dateStr, productId:line.productId, type:'devolucion', qty:line.qty, ref:'Devolución en venta rápida (carrito vaciado)'});
+      }
+    });
     quickSaleCart = [];
+    await Promise.all([saveProducts(), saveMovements()]);
     renderQuickSaleSummary();
+    renderInventory();
+    renderDashboard();
   });
 
   document.getElementById('btn-quicksale-charge').addEventListener('click', async ()=>{
@@ -2683,15 +2727,8 @@
     const paymentMethod = await showPaymentDialog(total);
     if(!paymentMethod) return;
 
-    const now = Date.now();
-    const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
-    quickSaleCart.forEach(line=>{
-      const p = products.find(x=>x.id===line.productId);
-      if(p && tracksStock(p)){
-        p.stock = Math.max(0, p.stock - line.qty);
-        movements.push({id:uid(), ts:now, date:dateStr, productId:line.productId, type:'venta', qty:-line.qty, ref:'Venta rápida en barra'});
-      }
-    });
+    // El inventario ya se descontó al momento de agregar cada producto al carrito
+    // (ver changeQuickSaleQty) — aquí solo se registra la venta/cobro.
     sales.push({
       id: uid(),
       date: todayStr(),
@@ -2703,7 +2740,7 @@
       paymentMethod
     });
     quickSaleCart = [];
-    await Promise.all([saveProducts(), saveSales(), saveMovements()]);
+    await saveSales();
     document.getElementById('quicksale-overlay').classList.remove('active');
     renderInventory(); renderDashboard();
   });
@@ -2993,6 +3030,7 @@
     if(type==='venta') return 'Venta';
     if(type==='ajuste') return 'Ajuste';
     if(type==='merma') return 'Merma';
+    if(type==='devolucion') return 'Devolución';
     return type;
   }
 
@@ -3080,15 +3118,8 @@
           const paymentMethod = await showPaymentDialog(acc.total);
           if(!paymentMethod) return;
 
-          const now = Date.now();
-          const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
-          (acc.items||[]).forEach(line=>{
-            const p = line.productId ? products.find(x=>x.id===line.productId) : null;
-            if(p && tracksStock(p)){
-              p.stock = Math.max(0, p.stock - line.qty);
-              movements.push({id:uid(), ts:now, date:dateStr, productId:p.id, type:'venta', qty:-line.qty, ref:'Cobro cuenta pendiente — '+acc.tableName});
-            }
-          });
+          // El inventario ya se descontó cuando se agregaron los productos a la cuenta
+          // (antes de quedar pendiente de cobro) — aquí solo se registra el cobro.
           sales.push({
             id: uid(),
             date: todayStr(),
@@ -3102,8 +3133,8 @@
 
           acc.status = 'cobrada';
           acc.paymentMethod = paymentMethod;
-          await Promise.all([saveProducts(), saveSales(), saveMovements(), savePendingAccounts()]);
-          renderPendingReport(); renderDashboard(); renderInventory();
+          await Promise.all([saveSales(), savePendingAccounts()]);
+          renderPendingReport(); renderDashboard();
         });
         tr.lastElementChild.appendChild(btn);
       }
