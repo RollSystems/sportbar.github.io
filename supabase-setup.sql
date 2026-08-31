@@ -119,6 +119,8 @@ drop policy if exists "movements select own" on movements;
 create policy "movements select own" on movements for select using (business_id = auth.uid());
 drop policy if exists "movements insert own" on movements;
 create policy "movements insert own" on movements for insert with check (business_id = auth.uid());
+drop policy if exists "movements update own" on movements;
+create policy "movements update own" on movements for update using (business_id = auth.uid());
 
 -- ---------- incomes (ingresos de mercadería) ----------
 create table if not exists incomes (
@@ -135,6 +137,8 @@ drop policy if exists "incomes select own" on incomes;
 create policy "incomes select own" on incomes for select using (business_id = auth.uid());
 drop policy if exists "incomes insert own" on incomes;
 create policy "incomes insert own" on incomes for insert with check (business_id = auth.uid());
+drop policy if exists "incomes update own" on incomes;
+create policy "incomes update own" on incomes for update using (business_id = auth.uid());
 
 -- ---------- outages (salidas por deterioro/vencimiento) ----------
 create table if not exists outages (
@@ -151,6 +155,8 @@ drop policy if exists "outages select own" on outages;
 create policy "outages select own" on outages for select using (business_id = auth.uid());
 drop policy if exists "outages insert own" on outages;
 create policy "outages insert own" on outages for insert with check (business_id = auth.uid());
+drop policy if exists "outages update own" on outages;
+create policy "outages update own" on outages for update using (business_id = auth.uid());
 
 -- ---------- pending_accounts (cuentas por cobrar) ----------
 create table if not exists pending_accounts (
