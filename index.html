@@ -1548,11 +1548,10 @@
   }
 
   async function buildBackupPayload(){
-    const data = {};
-    for(const key of BACKUP_KEYS){
-      try{ const r = await window.storage.get(key); data[key] = r ? JSON.parse(r.value) : null; }
-      catch(e){ data[key] = null; }
-    }
+    // Se usan directamente los datos que la app ya tiene cargados en memoria — funciona igual
+    // sin importar el almacenamiento activo (Supabase, Claude.ai o local), ya que ventas, kardex,
+    // ingresos, salidas y cuentas por cobrar viven en tablas aparte cuando hay Supabase conectado.
+    const data = { products, tables, sales, incomes, outages, pendingAccounts, offers, movements, settings };
     data._backupInfo = { app:'SportBar', generatedAt: new Date().toISOString() };
     return JSON.stringify(data, null, 2);
   }
