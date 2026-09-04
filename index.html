@@ -780,21 +780,10 @@
       </div>
       <input type="file" id="restore-file-input" accept="application/json,.json" style="display:none;">
 
-      <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Base de datos (Supabase)</h3>
-      <div id="db-status" style="font-size:13px; margin-bottom:12px; padding:10px 14px; border-radius:10px; background:var(--surface-2);">Usando almacenamiento local de este dispositivo.</div>
-      <div class="form-field" style="margin-bottom:10px;">
-        <label>URL del proyecto</label>
-        <input type="text" id="db-url" placeholder="https://xxxxxxxx.supabase.co">
-      </div>
-      <div class="form-field" style="margin-bottom:12px;">
-        <label>Llave anon (public)</label>
-        <input type="text" id="db-anon-key" placeholder="eyJhbGciOiJI...">
-      </div>
-      <div style="display:flex; gap:10px;">
-        <button class="btn btn-primary" id="btn-db-connect" style="flex:1;">🔌 Conectar</button>
-        <button class="btn btn-ghost" id="btn-db-disconnect" style="flex:1;">Usar almacenamiento local</button>
-      </div>
-      <p style="font-size:12px; color:var(--text-dim); margin:10px 0 0 0;">Cada dispositivo que deba compartir los mismos datos necesita conectarse con esta misma URL y llave. Al conectar o desconectar, la app se recarga.</p>
+      <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Base de datos</h3>
+      <div id="db-status" style="font-size:13px; margin-bottom:6px; padding:10px 14px; border-radius:10px; background:var(--surface-2);">Conectando…</div>
+      <p style="font-size:12px; color:var(--text-dim); margin:0 0 12px 0;">Esta app trabaja únicamente con la base de datos del sistema — no se puede usar sin iniciar sesión ni cambiar a almacenamiento local.</p>
+      <button class="btn btn-ghost btn-sm" id="btn-reconfig-db">Cambiar conexión…</button>
 
       <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Empezar de cero</h3>
       <p style="font-size:12px; color:var(--text-dim); margin:0 0 12px 0;">Vacía los productos, mesas y puestos de barra para cargar tus propios datos desde cero. No toca ventas históricas, ofertas ni configuración. Recomendado: haz un respaldo antes.</p>
@@ -894,23 +883,43 @@
   </div>
 </div>
 
+<!-- Configuración/reconexión de base de datos: única forma de entrar la URL/llave.
+     No existe ninguna opción de "usar almacenamiento local" en ningún lugar de la app. -->
+<div class="overlay" id="db-blocked-overlay" style="z-index:600;">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-header"><h2>Conectar base de datos</h2></div>
+    <div class="modal-body">
+      <p id="db-blocked-message" style="font-size:13px; color:var(--text-dim); margin:0 0 14px 0;"></p>
+      <div class="form-field" style="margin-bottom:10px;">
+        <label>URL del proyecto</label>
+        <input type="text" id="setup-db-url" placeholder="https://xxxxxxxx.supabase.co">
+      </div>
+      <div class="form-field">
+        <label>Llave anon (public)</label>
+        <input type="text" id="setup-db-anon-key" placeholder="eyJhbGciOiJI...">
+      </div>
+      <div id="setup-db-error" style="color:var(--red); font-size:13px; min-height:18px; margin-top:10px;"></div>
+    </div>
+    <div class="modal-footer" style="justify-content:flex-end;">
+      <button class="btn btn-primary" id="btn-setup-db-connect" style="width:100%;">Conectar</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
   "use strict";
 
   // ---------- BASE DE DATOS (Supabase) ----------
-  // Config guardada localmente en ESTE dispositivo (no puede vivir en Supabase: se necesita
-  // antes de poder conectarse a Supabase). Cada dispositivo que use la misma app debe configurar
-  // aquí la misma URL y llave para compartir los mismos datos.
+  // La configuración (URL + llave) se guarda en este dispositivo — no hay URL incrustada en el
+  // código. Sí se quitó, a propósito, cualquier opción de "usar almacenamiento local": sin esta
+  // configuración y sin sesión válida, la app no funciona.
   const SB_CONFIG_KEY = 'sportbar-supabase-config';
   function getSupabaseConfig(){
     try{ return JSON.parse(localStorage.getItem(SB_CONFIG_KEY) || 'null'); }catch(e){ return null; }
   }
   function saveSupabaseConfig(url, anonKey){
     localStorage.setItem(SB_CONFIG_KEY, JSON.stringify({url, anonKey}));
-  }
-  function clearSupabaseConfig(){
-    localStorage.removeItem(SB_CONFIG_KEY);
   }
 
   // businessId = el usuario que inició sesión (auth.uid()). Cada negocio que use el mismo
@@ -1091,46 +1100,20 @@
   const sbConfig = getSupabaseConfig();
   let usingSupabase = false;
   let supabaseClient = null;
+  let supabaseSetupError = null;
   if(sbConfig && sbConfig.url && sbConfig.anonKey && typeof window.supabase !== 'undefined'){
     try{
       supabaseClient = window.supabase.createClient(sbConfig.url, sbConfig.anonKey);
       window.storage = createSupabaseStorage(supabaseClient);
       usingSupabase = true;
-    }catch(e){ /* config inválida: se sigue con el almacenamiento local de respaldo */ }
+    }catch(e){ supabaseSetupError = 'No se pudo inicializar la conexión con los datos guardados. Verifica la URL y la llave.'; }
+  } else if(!sbConfig){
+    supabaseSetupError = 'Esta app necesita conectarse a una base de datos para funcionar. Ingresa la URL y la llave de tu proyecto de Supabase.';
+  } else if(typeof window.supabase === 'undefined'){
+    supabaseSetupError = 'No se pudo cargar la librería de Supabase — revisa tu conexión a internet.';
   }
-
-  // Fuera de Claude.ai (por ejemplo, en un servidor propio) window.storage no existe.
-  // Este respaldo usa localStorage del navegador con la misma interfaz (get/set/delete/list),
-  // para que la app guarde los datos igual dentro o fuera de Claude.ai.
-  if(!usingSupabase && (!window.storage || typeof window.storage.get !== 'function')){
-    const LS_PREFIX = 'marcador-app:';
-    window.storage = {
-      async get(key){
-        const raw = localStorage.getItem(LS_PREFIX + key);
-        if(raw === null) throw new Error('key not found: ' + key);
-        return { key, value: raw, shared: false };
-      },
-      async set(key, value){
-        localStorage.setItem(LS_PREFIX + key, value);
-        return { key, value, shared: false };
-      },
-      async delete(key){
-        localStorage.removeItem(LS_PREFIX + key);
-        return { key, deleted: true, shared: false };
-      },
-      async list(prefix){
-        const keys = [];
-        for(let i=0; i<localStorage.length; i++){
-          const k = localStorage.key(i);
-          if(k && k.indexOf(LS_PREFIX) === 0){
-            const bare = k.slice(LS_PREFIX.length);
-            if(!prefix || bare.indexOf(prefix) === 0) keys.push(bare);
-          }
-        }
-        return { keys, prefix, shared: false };
-      }
-    };
-  }
+  // Esta app trabaja únicamente contra una base de datos Supabase — a propósito,
+  // no existe ningún modo de almacenamiento local como alternativa.
 
   const money = n => 'Q' + Number(n||0).toFixed(2);
 
@@ -1672,56 +1655,51 @@
   // ---------- BASE DE DATOS (Supabase) ----------
   function updateDbStatus(){
     const el = document.getElementById('db-status');
-    const cfg = getSupabaseConfig();
-    document.getElementById('db-url').value = cfg ? cfg.url : '';
-    document.getElementById('db-anon-key').value = cfg ? cfg.anonKey : '';
-    if(usingSupabase && cfg){
-      el.textContent = '✅ Conectada a Supabase: ' + cfg.url;
+    if(!el) return;
+    if(usingSupabase){
+      el.textContent = '✅ Conectada a la base de datos del sistema.';
       el.style.color = 'var(--turf-bright)';
     } else {
-      el.textContent = 'Usando almacenamiento local de este dispositivo (sin base de datos compartida).';
-      el.style.color = 'var(--text-dim)';
+      el.textContent = '⚠️ No se pudo conectar a la base de datos (revisa tu conexión a internet).';
+      el.style.color = 'var(--red)';
     }
   }
 
-  document.getElementById('btn-db-connect').addEventListener('click', async ()=>{
-    let url = document.getElementById('db-url').value.trim();
-    const anonKey = document.getElementById('db-anon-key').value.trim();
-    if(!url || !anonKey){
-      await showAlert('Completa la URL del proyecto y la llave anon de Supabase.');
-      return;
-    }
-    url = url.replace(/\/+$/,''); // quita "/" al final si quedó pegado
+  function showDbSetupScreen(message){
+    const cfg = getSupabaseConfig();
+    document.getElementById('setup-db-url').value = cfg ? cfg.url : '';
+    document.getElementById('setup-db-anon-key').value = cfg ? cfg.anonKey : '';
+    document.getElementById('setup-db-error').textContent = '';
+    document.getElementById('db-blocked-message').textContent = message || '';
+    document.getElementById('db-blocked-overlay').classList.add('active');
+  }
+
+  document.getElementById('btn-setup-db-connect').addEventListener('click', async ()=>{
+    let url = document.getElementById('setup-db-url').value.trim();
+    const anonKey = document.getElementById('setup-db-anon-key').value.trim();
+    const errEl = document.getElementById('setup-db-error');
+    errEl.textContent = '';
+    if(!url || !anonKey){ errEl.textContent = 'Completa la URL del proyecto y la llave anon.'; return; }
+    url = url.replace(/\/+$/,'');
     if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)){
-      await showAlert('La URL no tiene el formato esperado. Debe verse exactamente así: https://tuproyecto.supabase.co (sin espacios, sin / al final, sin texto adicional). Cópiala desde Supabase → Settings → API → "Project URL".');
+      errEl.textContent = 'La URL no tiene el formato esperado: https://tuproyecto.supabase.co (sin espacios ni / al final).';
       return;
     }
     if(typeof window.supabase === 'undefined'){
-      await showAlert('No se pudo cargar la librería de Supabase (revisa tu conexión a internet e inténtalo de nuevo).');
+      errEl.textContent = 'No se pudo cargar la librería de Supabase. Revisa tu conexión a internet e inténtalo de nuevo.';
       return;
     }
-    const ok = await showConfirmDialog(
-      'La app se recargará y pedirá iniciar sesión (correo y contraseña del usuario que creaste en Supabase → Authentication → Users). Si ya tenías datos guardados localmente, no se copian automáticamente — puedes usar "Restaurar desde archivo" después de iniciar sesión, con un respaldo hecho antes. ¿Continuar?',
-      {title:'Conectar base de datos', confirmLabel:'Sí, conectar', cancelLabel:'Cancelar'}
-    );
-    if(!ok) return;
     saveSupabaseConfig(url, anonKey);
     location.reload();
   });
 
-  document.getElementById('btn-db-disconnect').addEventListener('click', async ()=>{
-    if(!getSupabaseConfig()){
-      await showAlert('Ya estás usando el almacenamiento local de este dispositivo.');
-      return;
-    }
-    const ok = await showConfirmDialog(
-      'Se desconectará esta base de datos y la app volverá a usar el almacenamiento local de este dispositivo. La app se recargará. ¿Continuar?',
-      {title:'Usar almacenamiento local', confirmLabel:'Sí, desconectar', cancelLabel:'Cancelar'}
-    );
-    if(!ok) return;
-    clearSupabaseConfig();
-    location.reload();
-  });
+  const btnReconfigDb = document.getElementById('btn-reconfig-db');
+  if(btnReconfigDb){
+    btnReconfigDb.addEventListener('click', ()=>{
+      document.getElementById('settings-overlay').classList.remove('active');
+      showDbSetupScreen('Puedes actualizar la conexión si necesitas corregir algo o migrar a otro proyecto. La app se recargará al conectar.');
+    });
+  }
 
   // ---------- EMPEZAR DE CERO (reiniciar catálogo) ----------
   document.getElementById('btn-reset-catalog').addEventListener('click', async ()=>{
@@ -3250,7 +3228,8 @@
       }
     }).catch(()=>{ showLoginScreen(); });
   } else {
-    startAppOnce();
+    // Sin base de datos disponible: la app se bloquea por completo, nunca opera en modo local.
+    showDbSetupScreen(supabaseSetupError || 'No se pudo establecer conexión con la base de datos.');
   }
 })();
 </script>
