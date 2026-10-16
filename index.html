@@ -305,10 +305,13 @@
         <div class="biz-name">Sport Bar Manager</div>
       </div>
       <div style="text-align:right;">
+        <button class="btn btn-ghost btn-sm" id="btn-event-mode" style="margin-bottom:6px;">🎵 Modo evento: apagado</button><br>
         <span id="offline-indicator" style="display:none; font-size:12px; color:var(--amber); margin-right:10px;"></span>
         <div id="clock"></div>
       </div>
     </div>
+
+    <div id="event-banner" style="display:none; background:var(--amber); color:#241703; font-weight:700; font-size:13px; text-align:center; padding:8px 14px; letter-spacing:0.3px;">🎵 MODO EVENTO ACTIVO — se cobra precio de evento y no aplican ofertas</div>
 
     <div id="view">
 
@@ -616,6 +619,7 @@
         <div class="form-field" style="grid-column:span 2;"><label>Nombre</label><input type="text" id="new-prod-name" placeholder="Cerveza nacional"></div>
         <div class="form-field"><label>Categoría</label><input type="text" id="new-prod-cat" placeholder="Bebidas" list="cat-datalist"><datalist id="cat-datalist"></datalist></div>
         <div class="form-field"><label>Precio (Q)</label><input type="number" id="new-prod-price" min="0" step="0.01" placeholder="0.00"></div>
+        <div class="form-field" style="grid-column:span 2;"><label>Precio de evento (Q, opcional)</label><input type="number" id="new-prod-event-price" min="0" step="0.01" placeholder="Déjalo vacío si no cambia en eventos"></div>
       </div>
       <label class="checkbox-field">
         <input type="checkbox" id="new-prod-no-stock">
@@ -641,6 +645,7 @@
         <div class="form-field" style="grid-column:span 2;"><label>Nombre</label><input type="text" id="edit-prod-name"></div>
         <div class="form-field"><label>Categoría</label><input type="text" id="edit-prod-cat" list="cat-datalist-edit"><datalist id="cat-datalist-edit"></datalist></div>
         <div class="form-field"><label>Precio (Q)</label><input type="number" id="edit-prod-price" min="0" step="0.01"></div>
+        <div class="form-field" style="grid-column:span 2;"><label>Precio de evento (Q, opcional)</label><input type="number" id="edit-prod-event-price" min="0" step="0.01" placeholder="Déjalo vacío si no cambia en eventos"></div>
       </div>
       <label class="checkbox-field">
         <input type="checkbox" id="edit-prod-no-stock">
@@ -1282,8 +1287,18 @@
   }
 
   // Desglosa la cantidad de un renglón de pedido en bultos de oferta + unidades individuales
+  // ---------- MODO EVENTO ----------
+  function eventModeOn(){ return !!(settings && settings.eventMode); }
+  function currentPriceMode(){ return eventModeOn() ? 'evento' : 'normal'; }
+  function hasEventPrice(p){ return p.eventPrice!=null && p.eventPrice!=='' && !isNaN(p.eventPrice); }
+  function priceForMode(p, mode){ return (mode==='evento' && hasEventPrice(p)) ? Number(p.eventPrice) : p.price; }
+  function eventSalesTotal(salesArr){
+    return salesArr.reduce((a,sl)=>a+(sl.items||[]).filter(i=>i.mode==='evento').reduce((b,i)=>b+i.qty*i.price,0),0);
+  }
+
   function computeLineBreakdown(item){
-    const offer = getOfferForProduct(item.productId);
+    // En modo evento las ofertas no aplican
+    const offer = item.mode==='evento' ? null : getOfferForProduct(item.productId);
     if(!offer || item.qty < offer.qty){
       return [{ label:item.name, qty:item.qty, subtotal:item.qty*item.price, isOffer:false }];
     }
@@ -1345,6 +1360,7 @@
   }
 
   function formatBreakdownNote(item){
+    if(item.mode==='evento') return 'Modo evento';
     const breakdown = computeLineBreakdown(item);
     if(breakdown.length===1 && !breakdown[0].isOffer) return '';
     return breakdown.map(r=>{
@@ -1366,7 +1382,7 @@
   let outages = [];
   let pendingAccounts = [];
   let offers = [];
-  let settings = { businessName:'SportBar', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
+  let settings = { businessName:'SportBar', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', eventMode:false, seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
   let movements = [];
   let incomeDraftLines = [];
   let outageDraftLines = [];
@@ -1549,7 +1565,20 @@
   async function saveOffers(){ try{ await window.storage.set('offers', JSON.stringify(offers), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
   async function saveSettings(){ try{ await window.storage.set('settings', JSON.stringify(settings), false); }catch(e){} if(usingSupabase) saveOfflineCache(); }
 
+  function updateEventModeUI(){
+    const btn = document.getElementById('btn-event-mode');
+    const banner = document.getElementById('event-banner');
+    if(!btn || !banner) return;
+    const on = eventModeOn();
+    btn.textContent = on ? '🎵 Modo evento: ENCENDIDO' : '🎵 Modo evento: apagado';
+    btn.style.background = on ? 'var(--amber)' : '';
+    btn.style.color = on ? '#241703' : '';
+    banner.style.display = on ? 'block' : 'none';
+    try{ populateOrderSelect(); populateQuickSaleSelect(); }catch(e){}
+  }
+
   function applySettings(){
+    updateEventModeUI();
     document.getElementById('brand-name').textContent = settings.businessName || 'SportBar';
     const logo = document.getElementById('brand-logo');
     const dot = document.getElementById('brand-dot');
@@ -2123,9 +2152,10 @@
     sel.innerHTML = cats.map(cat=>{
       const opts = products.filter(p=>(p.category||'Sin categoría')===cat).map(p=>{
         const meta = tracksStock(p) ? `stock ${p.stock}` : 'bajo demanda';
-        const offer = getOfferForProduct(p.id);
+        const offer = eventModeOn() ? null : getOfferForProduct(p.id);
         const offerNote = offer ? ` · Oferta ${offer.qty}×${money(offer.price)}` : '';
-        return `<option value="${p.id}">${p.name} — ${money(p.price)} (${meta})${offerNote}</option>`;
+        const shownPrice = priceForMode(p, currentPriceMode());
+        return `<option value="${p.id}">${p.name} — ${money(shownPrice)} (${meta})${offerNote}</option>`;
       }).join('');
       return `<optgroup label="${cat}">${opts}</optgroup>`;
     }).join('');
@@ -2140,14 +2170,15 @@
     document.getElementById('order-select-qty').value = 1;
   });
 
-  async function changeOrderQty(productId, delta){
+  async function changeOrderQty(productId, delta, lineMode){
     const t = tables.find(x=>x.id===activeTableId);
     const acc = getActiveAccount(t);
     const p = products.find(x=>x.id===productId);
     acc.order = acc.order || [];
-    let line = acc.order.find(i=>i.productId===productId);
+    const mode = lineMode || currentPriceMode();
+    let line = acc.order.find(i=>i.productId===productId && (i.mode||'normal')===mode);
     if(!line && delta>0){
-      line = {productId, name:p.name, price:p.price, qty:0};
+      line = {productId, name:p.name, price:priceForMode(p, mode), qty:0, mode};
       acc.order.push(line);
     }
     if(!line) return;
@@ -2211,8 +2242,8 @@
         </div>
         <span class="ol-subtotal">${money(subtotal)}</span>
       `;
-      d.querySelector('[data-act="minus"]').addEventListener('click', ()=> changeOrderQty(i.productId,-1));
-      d.querySelector('[data-act="plus"]').addEventListener('click', ()=> changeOrderQty(i.productId,1));
+      d.querySelector('[data-act="minus"]').addEventListener('click', ()=> changeOrderQty(i.productId,-1,i.mode||'normal'));
+      d.querySelector('[data-act="plus"]').addEventListener('click', ()=> changeOrderQty(i.productId,1,i.mode||'normal'));
       lines.appendChild(d);
     });
     document.getElementById('order-total').textContent = money(total);
@@ -2247,7 +2278,7 @@
       tableName: label,
       clientName: result.clientName || '',
       total,
-      items: acc.order.map(i=>({productId:i.productId, name:i.name, qty:i.qty, price:i.price})),
+      items: acc.order.map(i=>({productId:i.productId, name:i.name, qty:i.qty, price:i.price, mode:i.mode||'normal'})),
       status: 'pendiente'
     });
     if(multi){
@@ -2282,7 +2313,7 @@
       time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
       tableId: t.id,
       tableName: label,
-      items: acc.order.map(i=>({name:i.name, qty:i.qty, price:i.price})),
+      items: acc.order.map(i=>({name:i.name, qty:i.qty, price:i.price, mode:i.mode||'normal'})),
       total,
       paymentMethod: payment.method,
       cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
@@ -2332,7 +2363,7 @@
           row.className = 'inv-row';
           row.innerHTML = `
             <div class="inv-name">${p.name}</div>
-            <div class="inv-price">${money(p.price)}</div>
+            <div class="inv-price">${money(p.price)}${hasEventPrice(p) ? ' <span style="color:var(--amber);">· evento '+money(p.eventPrice)+'</span>' : ''}</div>
             <div class="nostock-badge">Bajo demanda · sin inventario</div>
             <button class="btn-icon" data-act="edit-product" title="Editar producto">✎</button>
           `;
@@ -2341,7 +2372,7 @@
           row.className = 'inv-row' + (low?' low':'');
           row.innerHTML = `
             <div class="inv-name">${p.name}</div>
-            <div class="inv-price">${money(p.price)}</div>
+            <div class="inv-price">${money(p.price)}${hasEventPrice(p) ? ' <span style="color:var(--amber);">· evento '+money(p.eventPrice)+'</span>' : ''}</div>
             <div class="inv-stock-badge${low?' low':''}">${p.stock} uds.</div>
             <button class="btn-icon" data-act="edit-product" title="Editar producto">✎</button>
           `;
@@ -2390,7 +2421,7 @@
   }
 
   document.getElementById('btn-add-product').addEventListener('click', ()=>{
-    ['new-prod-name','new-prod-cat','new-prod-price','new-prod-stock','new-prod-threshold'].forEach(id=> document.getElementById(id).value='');
+    ['new-prod-name','new-prod-cat','new-prod-price','new-prod-event-price','new-prod-stock','new-prod-threshold'].forEach(id=> document.getElementById(id).value='');
     document.getElementById('new-prod-no-stock').checked = false;
     document.getElementById('stock-fields').style.display = 'grid';
     const dl = document.getElementById('cat-datalist');
@@ -2412,11 +2443,13 @@
     const name = document.getElementById('new-prod-name').value.trim();
     const category = document.getElementById('new-prod-cat').value.trim() || 'Sin categoría';
     const price = parseFloat(document.getElementById('new-prod-price').value) || 0;
+    const evRaw = parseFloat(document.getElementById('new-prod-event-price').value);
+    const eventPrice = isNaN(evRaw) ? null : evRaw;
     const noStock = document.getElementById('new-prod-no-stock').checked || isFoodCategory(category);
     const stock = noStock ? null : (parseInt(document.getElementById('new-prod-stock').value) || 0);
     const threshold = noStock ? null : (parseInt(document.getElementById('new-prod-threshold').value) || 5);
     if(!name) return;
-    const newProduct = {id:uid(), name, category, price, stock, threshold, tracksInventory: !noStock};
+    const newProduct = {id:uid(), name, category, price, eventPrice, stock, threshold, tracksInventory: !noStock};
     products.push(newProduct);
     if(!noStock && stock > 0){
       const now = Date.now();
@@ -2437,6 +2470,7 @@
     document.getElementById('edit-prod-name').value = p.name;
     document.getElementById('edit-prod-cat').value = p.category;
     document.getElementById('edit-prod-price').value = p.price;
+    document.getElementById('edit-prod-event-price').value = hasEventPrice(p) ? p.eventPrice : '';
     const noStock = !tracksStock(p);
     document.getElementById('edit-prod-no-stock').checked = noStock;
     document.getElementById('edit-prod-threshold').value = noStock ? '' : p.threshold;
@@ -2464,6 +2498,8 @@
     const name = document.getElementById('edit-prod-name').value.trim();
     const category = document.getElementById('edit-prod-cat').value.trim() || 'Sin categoría';
     const price = parseFloat(document.getElementById('edit-prod-price').value) || 0;
+    const evRawE = parseFloat(document.getElementById('edit-prod-event-price').value);
+    const eventPriceE = isNaN(evRawE) ? null : evRawE;
     const noStock = document.getElementById('edit-prod-no-stock').checked || isFoodCategory(category);
     const threshold = noStock ? null : (parseInt(document.getElementById('edit-prod-threshold').value) || 5);
     if(!name) return;
@@ -2479,6 +2515,7 @@
     p.name = name;
     p.category = category;
     p.price = price;
+    p.eventPrice = eventPriceE;
     p.tracksInventory = !noStock;
     p.stock = noStock ? null : newStockVal;
     p.threshold = threshold;
@@ -2678,9 +2715,10 @@
     sel.innerHTML = cats.map(cat=>{
       const opts = products.filter(p=>(p.category||'Sin categoría')===cat).map(p=>{
         const meta = tracksStock(p) ? `stock ${p.stock}` : 'bajo demanda';
-        const offer = getOfferForProduct(p.id);
+        const offer = eventModeOn() ? null : getOfferForProduct(p.id);
         const offerNote = offer ? ` · Oferta ${offer.qty}×${money(offer.price)}` : '';
-        return `<option value="${p.id}">${p.name} — ${money(p.price)} (${meta})${offerNote}</option>`;
+        const shownPrice = priceForMode(p, currentPriceMode());
+        return `<option value="${p.id}">${p.name} — ${money(shownPrice)} (${meta})${offerNote}</option>`;
       }).join('');
       return `<optgroup label="${cat}">${opts}</optgroup>`;
     }).join('');
@@ -2694,11 +2732,12 @@
     document.getElementById('quicksale-select-qty').value = 1;
   });
 
-  async function changeQuickSaleQty(productId, delta){
+  async function changeQuickSaleQty(productId, delta, lineMode){
     const p = products.find(x=>x.id===productId);
-    let line = quickSaleCart.find(i=>i.productId===productId);
+    const mode = lineMode || currentPriceMode();
+    let line = quickSaleCart.find(i=>i.productId===productId && (i.mode||'normal')===mode);
     if(!line && delta>0){
-      line = {productId, name:p.name, price:p.price, qty:0};
+      line = {productId, name:p.name, price:priceForMode(p, mode), qty:0, mode};
       quickSaleCart.push(line);
     }
     if(!line) return;
@@ -2751,8 +2790,8 @@
         </div>
         <span class="ol-subtotal">${money(subtotal)}</span>
       `;
-      d.querySelector('[data-act="minus"]').addEventListener('click', ()=> changeQuickSaleQty(i.productId,-1));
-      d.querySelector('[data-act="plus"]').addEventListener('click', ()=> changeQuickSaleQty(i.productId,1));
+      d.querySelector('[data-act="minus"]').addEventListener('click', ()=> changeQuickSaleQty(i.productId,-1,i.mode||'normal'));
+      d.querySelector('[data-act="plus"]').addEventListener('click', ()=> changeQuickSaleQty(i.productId,1,i.mode||'normal'));
       lines.appendChild(d);
     });
     document.getElementById('quicksale-total').textContent = money(total);
@@ -2790,7 +2829,7 @@
       time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
       tableId: null,
       tableName: 'Barra (venta rápida)',
-      items: quickSaleCart.map(i=>({name:i.name, qty:i.qty, price:i.price})),
+      items: quickSaleCart.map(i=>({name:i.name, qty:i.qty, price:i.price, mode:i.mode||'normal'})),
       total,
       paymentMethod: payment.method,
       cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
@@ -2800,6 +2839,20 @@
     await saveSales();
     document.getElementById('quicksale-overlay').classList.remove('active');
     renderInventory(); renderDashboard();
+  });
+
+  document.getElementById('btn-event-mode').addEventListener('click', async ()=>{
+    const turningOn = !eventModeOn();
+    const ok = await showConfirmDialog(
+      turningOn
+        ? 'Se activará el modo evento: los productos nuevos que agregues se cobrarán a precio de evento y no se aplicarán ofertas. Las cuentas ya abiertas conservan los precios con que se agregaron. ¿Activar?'
+        : '¿Apagar el modo evento? Los productos nuevos volverán a precio normal y a aplicarse ofertas. Las cuentas ya abiertas conservan los precios con que se agregaron.',
+      {title: turningOn ? 'Activar modo evento' : 'Apagar modo evento', confirmLabel: turningOn ? 'Sí, activar' : 'Sí, apagar'}
+    );
+    if(!ok) return;
+    settings.eventMode = turningOn;
+    await saveSettings();
+    updateEventModeUI();
   });
 
   // ---------- CONFIGURACIÓN DEL NEGOCIO ----------
@@ -2928,14 +2981,14 @@
     tbody.innerHTML = '';
     const total = dayData.reduce((a,s)=>a+s.total,0);
     const { cash, card } = splitCashCard(dayData);
-    document.getElementById('report-summary').textContent = dayData.length ? `Total del día: ${money(total)}  ·  ${dayData.length} transacciones  ·  Efectivo: ${money(cash)}  ·  Tarjeta: ${money(card)}` : '';
+    document.getElementById('report-summary').textContent = dayData.length ? `Total del día: ${money(total)}  ·  ${dayData.length} transacciones  ·  Efectivo: ${money(cash)}  ·  Tarjeta: ${money(card)}${eventSalesTotal(dayData)>0 ? '  ·  🎵 Evento: '+money(eventSalesTotal(dayData)) : ''}` : '';
     document.getElementById('report-table').style.display = dayData.length ? 'table' : 'none';
     document.getElementById('report-empty').style.display = dayData.length ? 'none' : 'block';
     dayData.forEach(s=>{
       const tr = document.createElement('tr');
       const itemsStr = s.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
       const payLabel = s.paymentMethod==='Mixto' ? `Mixto (Efvo ${money(s.cashAmount)} / Tarj ${money(s.cardAmount)})` : (s.paymentMethod||'—');
-      tr.innerHTML = `<td>${s.time}</td><td>${s.tableName}</td><td>${itemsStr}</td><td>${payLabel}</td><td class="num">${money(s.total)}</td>`;
+      tr.innerHTML = `<td>${s.time}</td><td>${s.tableName}${(s.items||[]).some(i=>i.mode==='evento')?' 🎵':''}</td><td>${itemsStr}</td><td>${payLabel}</td><td class="num">${money(s.total)}</td>`;
       tbody.appendChild(tr);
     });
   }
@@ -2951,12 +3004,12 @@
     doc.setFontSize(11);
     doc.text('Total del dia: ' + money(total) + '   Transacciones: ' + dayData.length, 14, y);
     y += 6;
-    doc.text('Efectivo: ' + money(cash) + '   Tarjeta: ' + money(card), 14, y);
+    doc.text('Efectivo: ' + money(cash) + '   Tarjeta: ' + money(card) + (eventSalesTotal(dayData)>0 ? '   Evento: ' + money(eventSalesTotal(dayData)) : ''), 14, y);
     y += 7;
 
     const rows = dayData.map(s=>{
       const payLabel = s.paymentMethod==='Mixto' ? `Mixto (Efvo ${money(s.cashAmount)} / Tarj ${money(s.cardAmount)})` : (s.paymentMethod||'—');
-      return [s.time, s.tableName, s.items.map(i=>i.qty+'x '+i.name).join(', '), payLabel, money(s.total)];
+      return [s.time, s.tableName + ((s.items||[]).some(i=>i.mode==='evento') ? ' (evento)' : ''), s.items.map(i=>i.qty+'x '+i.name).join(', '), payLabel, money(s.total)];
     });
     doc.autoTable({
       startY: y,
@@ -3185,7 +3238,7 @@
             time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
             tableId: null,
             tableName: 'Cobro pendiente — ' + acc.tableName,
-            items: (acc.items||[]).map(i=>({name:i.name, qty:i.qty, price:i.price})),
+            items: (acc.items||[]).map(i=>({name:i.name, qty:i.qty, price:i.price, mode:i.mode||'normal'})),
             total: acc.total,
             paymentMethod: payment.method,
             cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
