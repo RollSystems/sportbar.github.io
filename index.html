@@ -459,7 +459,7 @@
         <div id="report-empty" style="display:none;">No hay ventas registradas en esta fecha.</div>
         <table class="report-table" id="report-table" style="display:none;">
           <thead>
-            <tr><th>Hora</th><th>Mesa / Barra</th><th>Productos</th><th>Pago</th><th style="text-align:right;">Total</th></tr>
+            <tr><th>Hora</th><th>Mesa / Barra</th><th>Productos</th><th>Pago</th><th style="text-align:right;">Total</th><th></th></tr>
           </thead>
           <tbody id="report-tbody"></tbody>
         </table>
@@ -753,6 +753,31 @@
           </select>
         </div>
       </div>
+
+      <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Impresión de ticket</h3>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Al cobrar</label>
+          <select id="settings-print-mode">
+            <option value="ask">Preguntar si imprimir</option>
+            <option value="auto">Imprimir automáticamente</option>
+            <option value="off">No imprimir</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Ancho del papel</label>
+          <select id="settings-print-width">
+            <option value="80">80 mm</option>
+            <option value="58">58 mm</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-field" style="margin-top:12px;">
+        <label>Mensaje al pie del ticket</label>
+        <input type="text" id="settings-print-footer" placeholder="¡Gracias por su visita!">
+      </div>
+      <p style="font-size:12px; color:var(--text-dim); margin:8px 0 10px 0;">Usa el diálogo de impresión del dispositivo: instala la impresora en la tablet y elígela ahí. Si es térmica, desactiva encabezados/pies de página y márgenes.</p>
+      <button class="btn btn-ghost btn-sm" id="btn-print-test">🖨 Imprimir ticket de prueba</button>
 
       <h3 style="font-family:var(--font-display); font-size:18px; color:var(--text-dim); margin:22px 0 12px 0; border-top:1px solid var(--line); padding-top:18px;">Respaldo de datos</h3>
       <div class="form-field" style="margin-bottom:14px;">
@@ -1382,7 +1407,7 @@
   let outages = [];
   let pendingAccounts = [];
   let offers = [];
-  let settings = { businessName:'SportBar', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', eventMode:false, seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
+  let settings = { businessName:'SportBar', nit:'', logoDataUrl:'', theme:'dark', fontSize:'normal', eventMode:false, print:{mode:'ask', width:'80', footer:'¡Gracias por su visita!'}, seeded:false, backup:{schedule:'manual', time:'23:30', lastBackupAt:null, folderName:''} };
   let movements = [];
   let incomeDraftLines = [];
   let outageDraftLines = [];
@@ -2319,6 +2344,7 @@
       cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
       cardAmount: payment.method==='Mixto' ? payment.cardAmount : null
     });
+    const closedSale = sales[sales.length-1];
 
     if(multi){
       t.accounts = t.accounts.filter(a=>a.id!==acc.id);
@@ -2336,6 +2362,7 @@
     } else {
       document.getElementById('order-overlay').classList.remove('active');
     }
+    await maybePrintReceipt(closedSale);
   });
 
   document.getElementById('btn-disable-table').addEventListener('click', async ()=>{
@@ -2835,10 +2862,12 @@
       cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
       cardAmount: payment.method==='Mixto' ? payment.cardAmount : null
     });
+    const closedSale = sales[sales.length-1];
     quickSaleCart = [];
     await saveSales();
     document.getElementById('quicksale-overlay').classList.remove('active');
     renderInventory(); renderDashboard();
+    await maybePrintReceipt(closedSale);
   });
 
   document.getElementById('btn-event-mode').addEventListener('click', async ()=>{
@@ -2855,6 +2884,88 @@
     updateEventModeUI();
   });
 
+  // ---------- IMPRESIÓN DE TICKET ----------
+  function escHtml(v){
+    return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function formatSaleDate(d){
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d||'');
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : (d||'');
+  }
+  function buildReceiptHTML(sale, opts){
+    opts = opts || {};
+    const pr = settings.print || {};
+    const width = parseInt(opts.width || pr.width || '80', 10) === 58 ? 58 : 80;
+    const footer = opts.footer != null ? opts.footer : (pr.footer != null ? pr.footer : '¡Gracias por su visita!');
+    const items = sale.items || [];
+    const gross = items.reduce((a,i)=>a+i.qty*i.price,0);
+    const discount = Math.round((gross - sale.total)*100)/100;
+    const rows = items.map(i=>`<tr><td>${i.qty} x ${escHtml(i.name)}${i.mode==='evento'?' (evento)':''}</td><td class="r">${money(i.qty*i.price)}</td></tr>`).join('');
+    const discountRow = discount > 0.009 ? `<tr><td>Descuento por ofertas</td><td class="r">-${money(discount)}</td></tr>` : '';
+    let payHtml;
+    if(sale.paymentMethod==='Mixto'){
+      payHtml = `<tr><td>Pago: Mixto</td><td></td></tr><tr><td>&nbsp;&nbsp;Efectivo</td><td class="r">${money(sale.cashAmount)}</td></tr><tr><td>&nbsp;&nbsp;Tarjeta</td><td class="r">${money(sale.cardAmount)}</td></tr>`;
+    } else {
+      payHtml = `<tr><td>Pago: ${escHtml(sale.paymentMethod||'—')}</td><td></td></tr>`;
+    }
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Ticket</title><style>
+      @page { size: ${width}mm auto; margin: 0; }
+      html,body{margin:0; padding:0; background:#fff;}
+      body{font-family:'Courier New',monospace; font-size:12px; color:#000; width:${width-8}mm; margin:0 auto; padding:3mm 0;}
+      .c{text-align:center;} .b{font-weight:bold;} .big{font-size:15px;}
+      .hr{border-top:1px dashed #000; margin:6px 0;}
+      table{width:100%; border-collapse:collapse;} td{vertical-align:top; padding:1px 0;} td.r{text-align:right; white-space:nowrap; padding-left:6px;}
+    </style></head><body>
+      <div class="c b big">${escHtml(settings.businessName||'SportBar')}</div>
+      ${settings.nit ? `<div class="c">NIT: ${escHtml(settings.nit)}</div>` : ''}
+      <div class="hr"></div>
+      <div>Fecha: ${escHtml(formatSaleDate(sale.date))} ${escHtml(sale.time||'')}</div>
+      <div>${escHtml(sale.tableName||'')}</div>
+      <div>Ticket: ${escHtml(String(sale.id||'').slice(-6).toUpperCase())}</div>
+      <div class="hr"></div>
+      <table>${rows}${discountRow}</table>
+      <div class="hr"></div>
+      <table><tr class="b big"><td>TOTAL</td><td class="r">${money(sale.total)}</td></tr>${payHtml}</table>
+      <div class="hr"></div>
+      <div class="c">${escHtml(footer)}</div>
+    </body></html>`;
+  }
+
+  function printReceipt(sale, opts){
+    const html = buildReceiptHTML(sale, opts);
+    const old = document.getElementById('print-frame');
+    if(old) old.remove();
+    const frame = document.createElement('iframe');
+    frame.id = 'print-frame';
+    frame.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0; visibility:hidden;';
+    document.body.appendChild(frame);
+    const doc = frame.contentWindow.document;
+    doc.open(); doc.write(html); doc.close();
+    setTimeout(()=>{
+      try{ frame.contentWindow.focus(); frame.contentWindow.print(); }
+      catch(e){ showAlert('No se pudo abrir la impresión en este dispositivo.'); }
+    }, 300);
+  }
+
+  async function maybePrintReceipt(sale){
+    const mode = (settings.print && settings.print.mode) || 'ask';
+    if(mode==='off' || !sale) return;
+    if(mode==='ask'){
+      const ok = await showConfirmDialog('¿Imprimir el ticket de esta venta?', {title:'Imprimir ticket', confirmLabel:'Imprimir', cancelLabel:'Sin ticket'});
+      if(!ok) return;
+    }
+    printReceipt(sale);
+  }
+
+  document.getElementById('btn-print-test').addEventListener('click', ()=>{
+    printReceipt({
+      id:'PRUEBA', date: todayStr(), time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
+      tableName:'Ticket de prueba',
+      items:[{name:'Producto de ejemplo', qty:2, price:15, mode:'normal'}],
+      total:30, paymentMethod:'Efectivo'
+    }, { width: document.getElementById('settings-print-width').value, footer: document.getElementById('settings-print-footer').value.trim() });
+  });
+
   // ---------- CONFIGURACIÓN DEL NEGOCIO ----------
   let pendingLogoDataUrl = undefined; // undefined = sin cambios, null = quitar, string = nuevo logo
 
@@ -2865,6 +2976,10 @@
     document.getElementById('settings-logo-input').value = '';
     document.getElementById('settings-theme').value = settings.theme || 'dark';
     document.getElementById('settings-fontsize').value = settings.fontSize || 'normal';
+    const prCfg = settings.print || {};
+    document.getElementById('settings-print-mode').value = prCfg.mode || 'ask';
+    document.getElementById('settings-print-width').value = prCfg.width || '80';
+    document.getElementById('settings-print-footer').value = prCfg.footer != null ? prCfg.footer : '¡Gracias por su visita!';
     document.getElementById('backup-schedule').value = settings.backup.schedule || 'manual';
     document.getElementById('backup-time').value = settings.backup.time || '23:30';
     document.getElementById('backup-folder-label').textContent = backupFolderHandle ? ('Carpeta: ' + backupFolderHandle.name) : 'No configurada — se descargará como archivo';
@@ -2904,6 +3019,7 @@
     settings.nit = document.getElementById('settings-nit').value.trim();
     settings.theme = document.getElementById('settings-theme').value;
     settings.fontSize = document.getElementById('settings-fontsize').value;
+    settings.print = { mode: document.getElementById('settings-print-mode').value, width: document.getElementById('settings-print-width').value, footer: document.getElementById('settings-print-footer').value.trim() };
     settings.backup.schedule = document.getElementById('backup-schedule').value;
     settings.backup.time = document.getElementById('backup-time').value || '23:30';
     if(pendingLogoDataUrl === null) settings.logoDataUrl = '';
@@ -2988,7 +3104,8 @@
       const tr = document.createElement('tr');
       const itemsStr = s.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
       const payLabel = s.paymentMethod==='Mixto' ? `Mixto (Efvo ${money(s.cashAmount)} / Tarj ${money(s.cardAmount)})` : (s.paymentMethod||'—');
-      tr.innerHTML = `<td>${s.time}</td><td>${s.tableName}${(s.items||[]).some(i=>i.mode==='evento')?' 🎵':''}</td><td>${itemsStr}</td><td>${payLabel}</td><td class="num">${money(s.total)}</td>`;
+      tr.innerHTML = `<td>${s.time}</td><td>${s.tableName}${(s.items||[]).some(i=>i.mode==='evento')?' 🎵':''}</td><td>${itemsStr}</td><td>${payLabel}</td><td class="num">${money(s.total)}</td><td><button class="btn btn-ghost btn-sm" data-reprint="${s.id}" title="Reimprimir ticket">🖨</button></td>`;
+      tr.querySelector('[data-reprint]').addEventListener('click', ()=> printReceipt(s));
       tbody.appendChild(tr);
     });
   }
@@ -3244,11 +3361,13 @@
             cashAmount: payment.method==='Mixto' ? payment.cashAmount : null,
             cardAmount: payment.method==='Mixto' ? payment.cardAmount : null
           });
+          const closedSale = sales[sales.length-1];
 
           acc.status = 'cobrada';
           acc.paymentMethod = payment.method;
           await Promise.all([saveSales(), savePendingAccounts()]);
           renderPendingReport(); renderDashboard();
+          await maybePrintReceipt(closedSale);
         });
         tr.lastElementChild.appendChild(btn);
       }
