@@ -317,10 +317,14 @@
 
     <!-- DASHBOARD -->
     <section class="view-section active" id="view-dashboard">
-      <h2 class="section-title">Tablero de hoy</h2>
+      <div class="toolbar">
+        <h2 class="section-title" style="margin:0;">Tablero</h2>
+        <button class="btn btn-amber btn-toolbar-action" id="btn-close-shift">🔒 Cierre de venta</button>
+      </div>
+      <p id="shift-info" style="color:var(--text-dim); font-size:13px; margin:-6px 0 14px 0;"></p>
       <div id="scoreboard">
         <div class="score-block">
-          <div class="score-label">Ventas de hoy</div>
+          <div class="score-label">Ventas del turno</div>
           <div class="score-value" id="score-sales">Q0.00</div>
         </div>
         <div class="score-divider"></div>
@@ -361,11 +365,11 @@
           <div id="lowstock-empty" style="display:none;">Todo el inventario está en buen nivel.</div>
         </div>
         <div class="card">
-          <h3>Producto más vendido hoy</h3>
+          <h3>Producto más vendido del turno</h3>
           <div id="top-product" style="font-family:var(--font-display); font-size:22px; color:var(--amber);">—</div>
         </div>
         <div class="card card-link" data-goto="reportes" data-subgoto="dia">
-          <h3>Ventas de hoy por forma de pago</h3>
+          <h3>Ventas del turno por forma de pago</h3>
           <ul style="list-style:none; margin:0; padding:0;">
             <li style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--line); font-size:14px;">
               <span>💵 Efectivo</span><span id="score-cash" style="font-family:var(--font-mono); color:var(--turf-bright); font-weight:600;">Q0.00</span>
@@ -445,6 +449,7 @@
         <button class="subtab-btn" data-sub="inv">Inventario</button>
         <button class="subtab-btn" data-sub="kardex">Kardex por producto</button>
         <button class="subtab-btn" data-sub="cobrar">Cuentas por cobrar</button>
+        <button class="subtab-btn" data-sub="cierres">Cierres</button>
       </div>
 
       <!-- Sub: Ventas del día -->
@@ -514,6 +519,16 @@
             <tr><th>Fecha</th><th>Tipo</th><th>Referencia</th><th style="text-align:right;">Entrada</th><th style="text-align:right;">Salida</th><th style="text-align:right;">Saldo</th></tr>
           </thead>
           <tbody id="kardex-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- Sub: Cierres de venta -->
+      <div class="subview" id="sub-cierres">
+        <div id="closures-summary" style="font-family:var(--font-mono); color:var(--amber); font-size:16px; margin-bottom:10px;"></div>
+        <div id="closures-empty" style="display:none; color:var(--text-dim);">Aún no se ha hecho ningún cierre de venta.</div>
+        <table class="report-table" id="closures-table" style="display:none;">
+          <thead><tr><th>Cierre</th><th>Turno</th><th>Desde</th><th>Hasta</th><th style="text-align:right;">Ventas</th><th style="text-align:right;">Efectivo</th><th style="text-align:right;">Tarjeta</th><th style="text-align:right;">Total</th><th></th></tr></thead>
+          <tbody id="closures-tbody"></tbody>
         </table>
       </div>
 
@@ -896,6 +911,15 @@
   </div>
 </div>
 
+<!-- CIERRE DE VENTA MODAL -->
+<div class="overlay" id="closure-overlay">
+  <div class="modal" style="max-width:520px;">
+    <div class="modal-header"><h2 id="closure-title">Cierre de venta</h2><button class="modal-close" id="closure-close">&times;</button></div>
+    <div class="modal-body" id="closure-body"></div>
+    <div class="modal-footer" id="closure-footer" style="justify-content:flex-end; gap:10px; flex-wrap:wrap;"></div>
+  </div>
+</div>
+
 <!-- DIALOGO PROPIO (reemplaza alert/confirm nativos, bloqueados dentro del sandbox del artifact) -->
 <div class="overlay" id="dialog-overlay">
   <div class="modal" style="max-width:420px;">
@@ -981,7 +1005,7 @@
   function saveOfflineCache(){
     try{
       localStorage.setItem(OFFLINE_CACHE_KEY, JSON.stringify({
-        products, tables, sales, incomes, outages, pendingAccounts, offers, movements, settings
+        products, tables, sales, incomes, outages, pendingAccounts, offers, movements, closures, settings
       }));
     }catch(e){}
   }
@@ -1019,6 +1043,10 @@
     } else if(entry.kind === 'row_upsert'){
       const { error } = await supabaseClient.from(entry.table).upsert(entry.row);
       if(error) throw error;
+    } else if(entry.kind === 'row_insert'){
+      // Los cierres solo se pueden agregar (nunca modificar): si ya existe, se da por guardado
+      const { error } = await supabaseClient.from(entry.table).insert(entry.row);
+      if(error && error.code !== '23505') throw error;
     }
   }
   async function flushOfflineQueue(){
@@ -1077,8 +1105,13 @@
   const ROW_MAPPERS = {
     sales: {
       table: 'sales',
-      toRow: s => ({ id:s.id, business_id:businessId, date:s.date, time:s.time, table_id:s.tableId||null, table_name:s.tableName, items:s.items, total:s.total, payment_method:s.paymentMethod||null, cash_amount:s.cashAmount!=null?s.cashAmount:null, card_amount:s.cardAmount!=null?s.cardAmount:null }),
-      fromRow: r => ({ id:r.id, date:r.date, time:r.time, tableId:r.table_id, tableName:r.table_name, items:r.items, total:Number(r.total), paymentMethod:r.payment_method, cashAmount:r.cash_amount!=null?Number(r.cash_amount):null, cardAmount:r.card_amount!=null?Number(r.card_amount):null })
+      toRow: s => ({ id:s.id, business_id:businessId, date:s.date, time:s.time, table_id:s.tableId||null, table_name:s.tableName, items:s.items, total:s.total, payment_method:s.paymentMethod||null, cash_amount:s.cashAmount!=null?s.cashAmount:null, card_amount:s.cardAmount!=null?s.cardAmount:null, ts:s.ts!=null?s.ts:null }),
+      fromRow: r => ({ id:r.id, date:r.date, time:r.time, tableId:r.table_id, tableName:r.table_name, items:r.items, total:Number(r.total), paymentMethod:r.payment_method, cashAmount:r.cash_amount!=null?Number(r.cash_amount):null, cardAmount:r.card_amount!=null?Number(r.card_amount):null, ts:r.ts!=null?Number(r.ts):null })
+    },
+    closures: {
+      table: 'closures',
+      toRow: c => ({ id:c.id, business_id:businessId, correlativo:c.correlativo, period_start:c.periodStart, closed_at:c.closedAt, sale_ids:c.saleIds, summary:c.summary }),
+      fromRow: r => ({ id:r.id, correlativo:r.correlativo, periodStart:Number(r.period_start), closedAt:Number(r.closed_at), saleIds:r.sale_ids||[], summary:r.summary||{} })
     },
     movements: {
       table: 'movements',
@@ -1403,6 +1436,7 @@
   let products = [];
   let tables = [];
   let sales = [];
+  let closures = [];
   let incomes = [];
   let outages = [];
   let pendingAccounts = [];
@@ -1431,6 +1465,7 @@
         pendingAccounts = cache.pendingAccounts || [];
         offers = cache.offers || [];
         movements = cache.movements || [];
+        closures = cache.closures || [];
         if(cache.settings) settings = Object.assign(settings, cache.settings);
         storageReady = true;
         return;
@@ -1454,6 +1489,7 @@
       try{ outages = await loadRowTable('outages'); }catch(e){ outages = []; }
       try{ pendingAccounts = await loadRowTable('pendingAccounts'); }catch(e){ pendingAccounts = []; }
       try{ movements = await loadRowTable('movements'); }catch(e){ movements = []; }
+      try{ closures = await loadRowTable('closures'); closures.sort((a,b)=>(a.correlativo||0)-(b.correlativo||0)); }catch(e){ closures = []; }
     } else {
       try{
         const s = await window.storage.get('sales');
@@ -1665,7 +1701,7 @@
     // Se usan directamente los datos que la app ya tiene cargados en memoria — funciona igual
     // sin importar el almacenamiento activo (Supabase, Claude.ai o local), ya que ventas, kardex,
     // ingresos, salidas y cuentas por cobrar viven en tablas aparte cuando hay Supabase conectado.
-    const data = { products, tables, sales, incomes, outages, pendingAccounts, offers, movements, settings };
+    const data = { products, tables, sales, incomes, outages, pendingAccounts, offers, movements, closures, settings };
     data._backupInfo = { app:'SportBar', generatedAt: new Date().toISOString() };
     return JSON.stringify(data, null, 2);
   }
@@ -1939,6 +1975,7 @@
       if(btn.dataset.sub==='inv') renderInventoryReport();
       if(btn.dataset.sub==='kardex') renderKardex();
       if(btn.dataset.sub==='cobrar') renderPendingReport();
+      if(btn.dataset.sub==='cierres') renderClosures();
     });
   });
 
@@ -1951,9 +1988,10 @@
   // ---------- DASHBOARD ----------
   function renderDashboard(){
     const today = todayStr();
-    const todaySales = sales.filter(s=>s.date===today);
+    const todaySales = openShiftSales(); // ventas del turno abierto (desde el último cierre)
     const total = todaySales.reduce((a,s)=>a+s.total,0);
     document.getElementById('score-sales').textContent = money(total);
+    updateShiftInfo(todaySales);
     tables.forEach(recomputeTableStatus);
     document.getElementById('score-occupied').textContent = tables.filter(t=>t.enabled && (t.type||'mesa')==='mesa' && t.status==='ocupada').length;
     document.getElementById('score-free').textContent = tables.filter(t=>t.enabled && (t.type||'mesa')==='mesa' && t.status==='libre').length;
@@ -2335,6 +2373,7 @@
     sales.push({
       id: uid(),
       date: todayStr(),
+      ts: Date.now(),
       time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
       tableId: t.id,
       tableName: label,
@@ -2853,6 +2892,7 @@
     sales.push({
       id: uid(),
       date: todayStr(),
+      ts: Date.now(),
       time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
       tableId: null,
       tableName: 'Barra (venta rápida)',
@@ -2932,7 +2972,10 @@
   }
 
   function printReceipt(sale, opts){
-    const html = buildReceiptHTML(sale, opts);
+    printHtmlDocument(buildReceiptHTML(sale, opts));
+  }
+
+  function printHtmlDocument(html){
     const old = document.getElementById('print-frame');
     if(old) old.remove();
     const frame = document.createElement('iframe');
@@ -2965,6 +3008,249 @@
       total:30, paymentMethod:'Efectivo'
     }, { width: document.getElementById('settings-print-width').value, footer: document.getElementById('settings-print-footer').value.trim() });
   });
+
+  // ---------- CIERRE DE VENTA ----------
+  const r2 = n => Math.round((n||0)*100)/100;
+  function fmtDateTime(ts){
+    if(!ts) return '—';
+    return new Date(ts).toLocaleString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  }
+  function fmtDateOnly(ts){
+    return new Date(ts).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
+  }
+  function localDateKey(ts){
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  }
+  function nextClosureNumber(){
+    return closures.reduce((m,c)=>Math.max(m,c.correlativo||0),0) + 1;
+  }
+  function closedSaleIdSet(){
+    const set = new Set();
+    closures.forEach(c=>(c.saleIds||[]).forEach(id=>set.add(id)));
+    return set;
+  }
+  // Ventas del turno abierto: las hechas con esta versión (tienen hora exacta de cobro)
+  // y que todavía no pertenecen a ningún cierre. Las anteriores quedan como historial.
+  function openShiftSales(){
+    const closed = closedSaleIdSet();
+    return sales.filter(s=> s.ts!=null && !closed.has(s.id));
+  }
+  function updateShiftInfo(shiftSales){
+    const el = document.getElementById('shift-info');
+    if(!el) return;
+    const last = closures.length ? closures.reduce((a,c)=>(c.correlativo||0)>(a.correlativo||0)?c:a) : null;
+    const lastTxt = last ? ` · Último cierre: #${last.correlativo} (${fmtDateTime(last.closedAt)})` : '';
+    if(shiftSales.length){
+      const start = Math.min(...shiftSales.map(s=>s.ts));
+      el.textContent = `Turno abierto desde ${fmtDateTime(start)}${lastTxt}`;
+    } else {
+      el.textContent = `Sin ventas en el turno actual${lastTxt}`;
+    }
+  }
+
+  function buildClosureSummary(shiftSales){
+    const total = r2(shiftSales.reduce((a,sl)=>a+sl.total,0));
+    const count = shiftSales.length;
+    const { cash, card } = splitCashCard(shiftSales);
+    const map = {};
+    shiftSales.forEach(sl=>(sl.items||[]).forEach(i=>{
+      if(!map[i.name]) map[i.name] = { name:i.name, qty:0 };
+      map[i.name].qty += i.qty;
+    }));
+    const topProducts = Object.values(map).sort((a,b)=>b.qty-a.qty).slice(0,5);
+    const pend = pendingAccounts.filter(a=>a.status==='pendiente');
+    let openCount = 0, openTotal = 0;
+    tables.forEach(t=>(t.accounts||[]).forEach(acc=>{
+      if((acc.order||[]).length){ openCount++; openTotal += orderTotal(acc.order); }
+    }));
+    return {
+      total, count, avg: count ? r2(total/count) : 0,
+      cash: r2(cash), card: r2(card), eventTotal: r2(eventSalesTotal(shiftSales)),
+      topProducts,
+      pendingBalance: r2(pend.reduce((a,x)=>a+x.total,0)), pendingCount: pend.length,
+      openAccounts: openCount, openAccountsTotal: r2(openTotal)
+    };
+  }
+
+  function closureSummaryHTML(c, preview){
+    const sm = c.summary || {};
+    const row = (label, value) => `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line);"><span>${label}</span><span style="font-family:var(--font-mono);">${value}</span></div>`;
+    const h3 = t => `<h3 style="font-family:var(--font-display); font-size:16px; color:var(--text-dim); margin:16px 0 4px 0;">${t}</h3>`;
+    const top = (sm.topProducts||[]).map(p=>row(escHtml(p.name), p.qty+' uds.')).join('') || '<div style="color:var(--text-dim); padding:6px 0;">—</div>';
+    let warn = '';
+    if(preview && sm.openAccounts>0){
+      warn = `<div style="background:var(--surface-2); border:1px solid var(--amber); border-radius:10px; padding:10px 12px; margin-top:14px; font-size:13px;">⚠️ Hay ${sm.openAccounts} cuenta(s) abierta(s) por ${money(sm.openAccountsTotal)}. No entran en este cierre: se cobrarán en el siguiente turno.</div>`;
+    }
+    return `
+      <div style="color:var(--text-dim); font-size:13px; margin-bottom:10px;">Turno del ${fmtDateOnly(c.periodStart)}<br>Desde ${fmtDateTime(c.periodStart)}<br>Hasta ${fmtDateTime(c.closedAt)}</div>
+      <div style="text-align:center; margin:6px 0 14px 0;"><div style="font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:var(--text-dim);">Total vendido</div><div style="font-family:var(--font-mono); font-size:34px; color:var(--amber); font-weight:600;">${money(sm.total)}</div></div>
+      ${row('Ventas', sm.count||0)}
+      ${row('Ticket promedio', money(sm.avg))}
+      ${row('💵 Efectivo', money(sm.cash))}
+      ${row('💳 Tarjeta', money(sm.card))}
+      ${sm.eventTotal>0 ? row('🎵 Vendido en modo evento', money(sm.eventTotal)) : ''}
+      ${h3('Más vendidos')}
+      ${top}
+      ${h3('Cuentas por cobrar')}
+      ${row('Saldo pendiente al cierre', `${money(sm.pendingBalance)} (${sm.pendingCount||0})`)}
+      ${warn}`;
+  }
+
+  function showClosureModal(c, mode){
+    const isPreview = mode === 'preview';
+    document.getElementById('closure-title').textContent = isPreview ? `Cierre de venta #${c.correlativo} — resumen` : `Cierre de venta #${c.correlativo}`;
+    document.getElementById('closure-body').innerHTML = closureSummaryHTML(c, isPreview);
+    const footer = document.getElementById('closure-footer');
+    footer.innerHTML = '';
+    const mk = (label, cls, fn) => {
+      const b = document.createElement('button');
+      b.className = 'btn ' + cls; b.textContent = label;
+      b.addEventListener('click', fn);
+      footer.appendChild(b);
+    };
+    const close = ()=> document.getElementById('closure-overlay').classList.remove('active');
+    if(isPreview){
+      mk('Cancelar', 'btn-ghost', close);
+      mk('Confirmar cierre', 'btn-primary', ()=> confirmClosure(c));
+    } else {
+      mk('PDF', 'btn-amber', ()=> exportClosurePDF(c));
+      mk('🖨 Imprimir', 'btn-ghost', ()=> printClosure(c));
+      mk('Cerrar', 'btn-primary', close);
+    }
+    document.getElementById('closure-overlay').classList.add('active');
+  }
+  document.getElementById('closure-close').addEventListener('click', ()=> document.getElementById('closure-overlay').classList.remove('active'));
+
+  // Los cierres solo se agregan: en Supabase la tabla no tiene permiso de modificar ni borrar
+  async function saveClosure(c){
+    if(!usingSupabase) return;
+    const row = ROW_MAPPERS.closures.toRow(c);
+    await attemptOrQueue({kind:'row_insert', table:'closures', row}, async ()=>{
+      const { error } = await supabaseClient.from('closures').insert(row);
+      if(error && error.code !== '23505') throw error;
+    });
+    saveOfflineCache();
+  }
+
+  let closingInProgress = false;
+  async function confirmClosure(c){
+    if(closingInProgress) return;
+    closingInProgress = true;
+    try{
+      const closure = {
+        id: uid(), correlativo: nextClosureNumber(),
+        periodStart: c.periodStart, closedAt: Date.now(),
+        saleIds: c.saleIds, summary: c.summary
+      };
+      closures.push(closure);
+      await saveClosure(closure);
+      renderDashboard();
+      showClosureModal(closure, 'view');
+    } finally {
+      closingInProgress = false;
+    }
+  }
+
+  document.getElementById('btn-close-shift').addEventListener('click', async ()=>{
+    const shiftSales = openShiftSales();
+    if(shiftSales.length === 0){
+      await showAlert('No hay ventas en el turno actual para cerrar.');
+      return;
+    }
+    showClosureModal({
+      correlativo: nextClosureNumber(),
+      periodStart: Math.min(...shiftSales.map(sl=>sl.ts)),
+      closedAt: Date.now(),
+      saleIds: shiftSales.map(sl=>sl.id),
+      summary: buildClosureSummary(shiftSales)
+    }, 'preview');
+  });
+
+  function renderClosures(){
+    const tbody = document.getElementById('closures-tbody');
+    tbody.innerHTML = '';
+    const list = [...closures].sort((a,b)=>(b.correlativo||0)-(a.correlativo||0));
+    document.getElementById('closures-empty').style.display = list.length ? 'none' : 'block';
+    document.getElementById('closures-table').style.display = list.length ? 'table' : 'none';
+    document.getElementById('closures-summary').textContent = list.length ? `${list.length} cierres registrados` : '';
+    list.forEach(c=>{
+      const sm = c.summary || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>#${c.correlativo}</td><td>${fmtDateOnly(c.periodStart)}</td><td>${fmtDateTime(c.periodStart)}</td><td>${fmtDateTime(c.closedAt)}</td><td class="num">${sm.count||0}</td><td class="num">${money(sm.cash)}</td><td class="num">${money(sm.card)}</td><td class="num">${money(sm.total)}</td><td></td>`;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-ghost btn-sm'; btn.textContent = 'Ver';
+      btn.addEventListener('click', ()=> showClosureModal(c, 'view'));
+      tr.lastElementChild.appendChild(btn);
+      tbody.appendChild(tr);
+    });
+  }
+
+  function exportClosurePDF(c){
+    const sm = c.summary || {};
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    let y = addPdfHeader(doc, `Cierre de venta #${c.correlativo} — turno del ${fmtDateOnly(c.periodStart)}`);
+    doc.setFontSize(11);
+    doc.text(`Desde: ${fmtDateTime(c.periodStart)}   Hasta: ${fmtDateTime(c.closedAt)}`, 14, y);
+    y += 7;
+    const body = [
+      ['Total vendido', money(sm.total)],
+      ['Ventas (transacciones)', String(sm.count||0)],
+      ['Ticket promedio', money(sm.avg)],
+      ['Efectivo', money(sm.cash)],
+      ['Tarjeta', money(sm.card)]
+    ];
+    if(sm.eventTotal>0) body.push(['Vendido en modo evento', money(sm.eventTotal)]);
+    body.push(['Cuentas por cobrar pendientes al cierre', `${money(sm.pendingBalance)} (${sm.pendingCount||0})`]);
+    doc.autoTable({ startY:y, head:[['Concepto','Valor']], body, styles:{fontSize:10}, headStyles:{fillColor:[47,111,78]} });
+    y = doc.lastAutoTable.finalY + 8;
+    if((sm.topProducts||[]).length){
+      doc.autoTable({ startY:y, head:[['Producto más vendido','Unidades']], body: sm.topProducts.map(p=>[p.name, String(p.qty)]), styles:{fontSize:10}, headStyles:{fillColor:[47,111,78]} });
+    }
+    doc.save(`cierre-${c.correlativo}-${localDateKey(c.periodStart)}.pdf`);
+  }
+
+  function printClosure(c){
+    const sm = c.summary || {};
+    const pr = settings.print || {};
+    const width = parseInt(pr.width || '80', 10) === 58 ? 58 : 80;
+    const li = (l, v) => `<tr><td>${l}</td><td class="r">${v}</td></tr>`;
+    const tops = (sm.topProducts||[]).map(p=>li(escHtml(p.name), p.qty+' uds.')).join('');
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cierre</title><style>
+      @page { size: ${width}mm auto; margin: 0; }
+      html,body{margin:0; padding:0; background:#fff;}
+      body{font-family:'Courier New',monospace; font-size:12px; color:#000; width:${width-8}mm; margin:0 auto; padding:3mm 0;}
+      .c{text-align:center;} .b{font-weight:bold;} .big{font-size:15px;}
+      .hr{border-top:1px dashed #000; margin:6px 0;}
+      table{width:100%; border-collapse:collapse;} td{vertical-align:top; padding:1px 0;} td.r{text-align:right; white-space:nowrap; padding-left:6px;}
+    </style></head><body>
+      <div class="c b big">${escHtml(settings.businessName||'SportBar')}</div>
+      ${settings.nit ? `<div class="c">NIT: ${escHtml(settings.nit)}</div>` : ''}
+      <div class="hr"></div>
+      <div class="c b">CIERRE DE VENTA #${c.correlativo}</div>
+      <div>Turno del ${fmtDateOnly(c.periodStart)}</div>
+      <div>Desde: ${fmtDateTime(c.periodStart)}</div>
+      <div>Hasta: ${fmtDateTime(c.closedAt)}</div>
+      <div class="hr"></div>
+      <table>
+        ${li('Ventas', sm.count||0)}
+        ${li('Ticket promedio', money(sm.avg))}
+        ${li('Efectivo', money(sm.cash))}
+        ${li('Tarjeta', money(sm.card))}
+        ${sm.eventTotal>0 ? li('Modo evento', money(sm.eventTotal)) : ''}
+      </table>
+      <div class="hr"></div>
+      <table><tr class="b big"><td>TOTAL</td><td class="r">${money(sm.total)}</td></tr></table>
+      <div class="hr"></div>
+      <div class="b">Más vendidos</div>
+      <table>${tops || '<tr><td>—</td><td></td></tr>'}</table>
+      <div class="hr"></div>
+      <table>${li('Por cobrar pendiente', money(sm.pendingBalance))}</table>
+    </body></html>`;
+    printHtmlDocument(html);
+  }
 
   // ---------- CONFIGURACIÓN DEL NEGOCIO ----------
   let pendingLogoDataUrl = undefined; // undefined = sin cambios, null = quitar, string = nuevo logo
@@ -3352,6 +3638,7 @@
           sales.push({
             id: uid(),
             date: todayStr(),
+            ts: Date.now(),
             time: new Date().toLocaleTimeString('es-GT',{hour:'2-digit',minute:'2-digit'}),
             tableId: null,
             tableName: 'Cobro pendiente — ' + acc.tableName,
