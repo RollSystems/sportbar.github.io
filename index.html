@@ -3053,13 +3053,32 @@
   function buildClosureSummary(shiftSales){
     const total = r2(shiftSales.reduce((a,sl)=>a+sl.total,0));
     const count = shiftSales.length;
-    const { cash, card } = splitCashCard(shiftSales);
+
+    // Productos vendidos: cantidad y valor (al precio con que se cobró). Lo vendido en modo evento va aparte.
     const map = {};
     shiftSales.forEach(sl=>(sl.items||[]).forEach(i=>{
-      if(!map[i.name]) map[i.name] = { name:i.name, qty:0 };
-      map[i.name].qty += i.qty;
+      const mode = i.mode==='evento' ? 'evento' : 'normal';
+      const key = i.name + '|' + mode;
+      if(!map[key]) map[key] = { name:i.name, mode, qty:0, value:0 };
+      map[key].qty += i.qty;
+      map[key].value += i.qty * i.price;
     }));
-    const topProducts = Object.values(map).sort((a,b)=>b.qty-a.qty).slice(0,5);
+    const products = Object.values(map)
+      .map(pr=>({ name:pr.name, mode:pr.mode, qty:pr.qty, value:r2(pr.value) }))
+      .sort((a,b)=> a.name.localeCompare(b.name,'es') || ((a.mode==='evento')-(b.mode==='evento')));
+    const productsTotal = r2(products.reduce((a,pr)=>a+pr.value,0));
+    // Lo cobrado menos la suma de productos: negativo = descuento por ofertas
+    const adjustment = r2(total - productsTotal);
+
+    // Formas de pago: efectivo, tarjeta y pago mixto por separado, de modo que sumen el total general
+    let cashOnly=0, cardOnly=0, mixedTotal=0, mixedCash=0, mixedCard=0, cashOnlyCount=0, cardOnlyCount=0, mixedCount=0;
+    shiftSales.forEach(sl=>{
+      if(sl.paymentMethod==='Mixto'){ mixedCount++; mixedTotal += sl.total; mixedCash += sl.cashAmount||0; mixedCard += sl.cardAmount||0; }
+      else if(sl.paymentMethod==='Efectivo'){ cashOnlyCount++; cashOnly += sl.total; }
+      else if(sl.paymentMethod==='Tarjeta'){ cardOnlyCount++; cardOnly += sl.total; }
+    });
+    const otherPay = r2(total - cashOnly - cardOnly - mixedTotal);
+
     const pend = pendingAccounts.filter(a=>a.status==='pendiente');
     let openCount = 0, openTotal = 0;
     tables.forEach(t=>(t.accounts||[]).forEach(acc=>{
@@ -3067,8 +3086,11 @@
     }));
     return {
       total, count, avg: count ? r2(total/count) : 0,
-      cash: r2(cash), card: r2(card), eventTotal: r2(eventSalesTotal(shiftSales)),
-      topProducts,
+      cash: r2(cashOnly + mixedCash), card: r2(cardOnly + mixedCard),
+      cashOnly: r2(cashOnly), cardOnly: r2(cardOnly), mixedTotal: r2(mixedTotal), mixedCash: r2(mixedCash), mixedCard: r2(mixedCard),
+      cashOnlyCount, cardOnlyCount, mixedCount, otherPay,
+      eventTotal: r2(eventSalesTotal(shiftSales)),
+      products, productsTotal, adjustment,
       pendingBalance: r2(pend.reduce((a,x)=>a+x.total,0)), pendingCount: pend.length,
       openAccounts: openCount, openAccountsTotal: r2(openTotal)
     };
@@ -3076,23 +3098,46 @@
 
   function closureSummaryHTML(c, preview){
     const sm = c.summary || {};
-    const row = (label, value) => `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line);"><span>${label}</span><span style="font-family:var(--font-mono);">${value}</span></div>`;
+    const legacy = sm.productsTotal === undefined; // cierres hechos con la versión anterior del resumen
+    const row = (label, value, o) => {
+      o = o || {};
+      return `<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line);${o.strong?' font-weight:700;':''}${o.muted?' color:var(--text-dim); font-size:13px;':''}"><span>${label}</span><span style="font-family:var(--font-mono);">${value}</span></div>`;
+    };
     const h3 = t => `<h3 style="font-family:var(--font-display); font-size:16px; color:var(--text-dim); margin:16px 0 4px 0;">${t}</h3>`;
-    const top = (sm.topProducts||[]).map(p=>row(escHtml(p.name), p.qty+' uds.')).join('') || '<div style="color:var(--text-dim); padding:6px 0;">—</div>';
+    const cell = 'padding:6px 0; border-bottom:1px solid var(--line);';
+    const mono = 'text-align:right; font-family:var(--font-mono);';
+    const prodRows = (sm.products||sm.topProducts||[]).map(pr=>`<tr><td style="${cell}">${escHtml(pr.name)}${pr.mode==='evento'?' 🎵':''}</td><td style="${cell} ${mono}">${pr.qty}</td><td style="${cell} ${mono}">${pr.value!=null ? money(pr.value) : '—'}</td></tr>`).join('');
     let warn = '';
     if(preview && sm.openAccounts>0){
       warn = `<div style="background:var(--surface-2); border:1px solid var(--amber); border-radius:10px; padding:10px 12px; margin-top:14px; font-size:13px;">⚠️ Hay ${sm.openAccounts} cuenta(s) abierta(s) por ${money(sm.openAccountsTotal)}. No entran en este cierre: se cobrarán en el siguiente turno.</div>`;
     }
+    const adj = sm.adjustment ? row(sm.adjustment<0 ? 'Descuento por ofertas' : 'Otros ajustes', (sm.adjustment<0?'-':'+')+money(Math.abs(sm.adjustment))) : '';
+    const payments = legacy
+      ? row('💵 Efectivo', money(sm.cash)) + row('💳 Tarjeta', money(sm.card))
+      : row(`💵 Efectivo (${sm.cashOnlyCount})`, money(sm.cashOnly))
+        + row(`💳 Tarjeta (${sm.cardOnlyCount})`, money(sm.cardOnly))
+        + row(`➗ Pago mixto (${sm.mixedCount})`, money(sm.mixedTotal))
+        + (sm.mixedCount>0 ? row('&nbsp;&nbsp;↳ parte en efectivo', money(sm.mixedCash), {muted:true}) + row('&nbsp;&nbsp;↳ parte en tarjeta', money(sm.mixedCard), {muted:true}) : '')
+        + (sm.otherPay ? row('Sin forma de pago registrada', money(sm.otherPay)) : '')
+        + row('TOTAL GENERAL', money(sm.total), {strong:true})
+        + h3('Dinero recibido')
+        + row('Total en efectivo', money(sm.cash))
+        + row('Total en tarjeta', money(sm.card))
+        + '<div style="color:var(--text-dim); font-size:12px; margin-top:4px;">Incluyen la parte en efectivo y en tarjeta de los pagos mixtos.</div>';
     return `
       <div style="color:var(--text-dim); font-size:13px; margin-bottom:10px;">Turno del ${fmtDateOnly(c.periodStart)}<br>Desde ${fmtDateTime(c.periodStart)}<br>Hasta ${fmtDateTime(c.closedAt)}</div>
       <div style="text-align:center; margin:6px 0 14px 0;"><div style="font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:var(--text-dim);">Total vendido</div><div style="font-family:var(--font-mono); font-size:34px; color:var(--amber); font-weight:600;">${money(sm.total)}</div></div>
       ${row('Ventas', sm.count||0)}
       ${row('Ticket promedio', money(sm.avg))}
-      ${row('💵 Efectivo', money(sm.cash))}
-      ${row('💳 Tarjeta', money(sm.card))}
       ${sm.eventTotal>0 ? row('🎵 Vendido en modo evento', money(sm.eventTotal)) : ''}
-      ${h3('Más vendidos')}
-      ${top}
+      ${h3('Producto vendido')}
+      <table style="width:100%; border-collapse:collapse; font-size:14px;">
+        <thead><tr style="color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:1px;"><th style="text-align:left; padding:4px 0;">Producto</th><th style="text-align:right;">Cant.</th><th style="text-align:right;">Valor</th></tr></thead>
+        <tbody>${prodRows || '<tr><td colspan="3" style="padding:6px 0; color:var(--text-dim);">—</td></tr>'}</tbody>
+      </table>
+      ${legacy ? '' : row('Subtotal productos', money(sm.productsTotal)) + adj + row('TOTAL GENERAL', money(sm.total), {strong:true})}
+      ${h3('Forma de pago')}
+      ${payments}
       ${h3('Cuentas por cobrar')}
       ${row('Saldo pendiente al cierre', `${money(sm.pendingBalance)} (${sm.pendingCount||0})`)}
       ${warn}`;
@@ -3189,35 +3234,71 @@
 
   function exportClosurePDF(c){
     const sm = c.summary || {};
+    const legacy = sm.productsTotal === undefined;
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
     let y = addPdfHeader(doc, `Cierre de venta #${c.correlativo} — turno del ${fmtDateOnly(c.periodStart)}`);
     doc.setFontSize(11);
     doc.text(`Desde: ${fmtDateTime(c.periodStart)}   Hasta: ${fmtDateTime(c.closedAt)}`, 14, y);
-    y += 7;
-    const body = [
-      ['Total vendido', money(sm.total)],
-      ['Ventas (transacciones)', String(sm.count||0)],
-      ['Ticket promedio', money(sm.avg)],
-      ['Efectivo', money(sm.cash)],
-      ['Tarjeta', money(sm.card)]
-    ];
-    if(sm.eventTotal>0) body.push(['Vendido en modo evento', money(sm.eventTotal)]);
-    body.push(['Cuentas por cobrar pendientes al cierre', `${money(sm.pendingBalance)} (${sm.pendingCount||0})`]);
-    doc.autoTable({ startY:y, head:[['Concepto','Valor']], body, styles:{fontSize:10}, headStyles:{fillColor:[47,111,78]} });
-    y = doc.lastAutoTable.finalY + 8;
-    if((sm.topProducts||[]).length){
-      doc.autoTable({ startY:y, head:[['Producto más vendido','Unidades']], body: sm.topProducts.map(p=>[p.name, String(p.qty)]), styles:{fontSize:10}, headStyles:{fillColor:[47,111,78]} });
+    y += 6;
+    doc.text(`Ventas: ${sm.count||0}   Ticket promedio: ${money(sm.avg)}` + (sm.eventTotal>0 ? `   Modo evento: ${money(sm.eventTotal)}` : ''), 14, y);
+    y += 4;
+    const headStyles = { fillColor:[47,111,78] };
+    const footStyles = { fillColor:[235,235,235], textColor:20, fontStyle:'bold' };
+    const colRight = { 1:{halign:'right'}, 2:{halign:'right'} };
+
+    const prods = sm.products || sm.topProducts || [];
+    const prodBody = prods.map(pr=>[pr.name + (pr.mode==='evento' ? ' (evento)' : ''), String(pr.qty), pr.value!=null ? money(pr.value) : '—']);
+    const prodFoot = [];
+    if(!legacy){
+      prodFoot.push(['Subtotal productos', '', money(sm.productsTotal)]);
+      if(sm.adjustment) prodFoot.push([sm.adjustment<0 ? 'Descuento por ofertas' : 'Otros ajustes', '', (sm.adjustment<0?'-':'+') + money(Math.abs(sm.adjustment))]);
+      prodFoot.push(['TOTAL GENERAL', '', money(sm.total)]);
     }
+    doc.autoTable({ startY:y, head:[['Producto vendido','Cant.','Valor']], body:prodBody, foot: prodFoot.length ? prodFoot : undefined, showFoot:'lastPage', styles:{fontSize:10}, headStyles, footStyles, columnStyles:colRight });
+    y = doc.lastAutoTable.finalY + 8;
+
+    let payBody, payFoot;
+    if(legacy){
+      payBody = [['Efectivo','',money(sm.cash)], ['Tarjeta','',money(sm.card)]];
+    } else {
+      payBody = [
+        ['Efectivo', String(sm.cashOnlyCount), money(sm.cashOnly)],
+        ['Tarjeta', String(sm.cardOnlyCount), money(sm.cardOnly)],
+        ['Pago mixto', String(sm.mixedCount), money(sm.mixedTotal)]
+      ];
+      if(sm.mixedCount>0){
+        payBody.push(['     parte en efectivo', '', money(sm.mixedCash)]);
+        payBody.push(['     parte en tarjeta', '', money(sm.mixedCard)]);
+      }
+      if(sm.otherPay) payBody.push(['Sin forma de pago registrada', '', money(sm.otherPay)]);
+      payFoot = [['TOTAL GENERAL', '', money(sm.total)]];
+    }
+    doc.autoTable({ startY:y, head:[['Forma de pago','Ventas','Monto']], body:payBody, foot:payFoot, showFoot:'lastPage', styles:{fontSize:10}, headStyles, footStyles, columnStyles:colRight });
+    y = doc.lastAutoTable.finalY + 8;
+
+    const recv = [['Total en efectivo (incluye parte de mixtos)', money(sm.cash)], ['Total en tarjeta (incluye parte de mixtos)', money(sm.card)]];
+    recv.push(['Cuentas por cobrar pendientes al cierre', `${money(sm.pendingBalance)} (${sm.pendingCount||0})`]);
+    doc.autoTable({ startY:y, head:[['Resumen','Valor']], body:recv, styles:{fontSize:10}, headStyles, columnStyles:{1:{halign:'right'}} });
     doc.save(`cierre-${c.correlativo}-${localDateKey(c.periodStart)}.pdf`);
   }
 
   function printClosure(c){
     const sm = c.summary || {};
+    const legacy = sm.productsTotal === undefined;
     const pr = settings.print || {};
     const width = parseInt(pr.width || '80', 10) === 58 ? 58 : 80;
     const li = (l, v) => `<tr><td>${l}</td><td class="r">${v}</td></tr>`;
-    const tops = (sm.topProducts||[]).map(p=>li(escHtml(p.name), p.qty+' uds.')).join('');
+    const prods = sm.products || sm.topProducts || [];
+    const prodRows = prods.map(x=>li(`${x.qty} x ${escHtml(x.name)}${x.mode==='evento'?' (ev.)':''}`, x.value!=null ? money(x.value) : '')).join('');
+    const adjRow = sm.adjustment ? li(sm.adjustment<0 ? 'Descuento por ofertas' : 'Otros ajustes', (sm.adjustment<0?'-':'+') + money(Math.abs(sm.adjustment))) : '';
+    const payRows = legacy
+      ? li('Efectivo', money(sm.cash)) + li('Tarjeta', money(sm.card))
+      : li(`Efectivo (${sm.cashOnlyCount})`, money(sm.cashOnly))
+        + li(`Tarjeta (${sm.cardOnlyCount})`, money(sm.cardOnly))
+        + li(`Pago mixto (${sm.mixedCount})`, money(sm.mixedTotal))
+        + (sm.mixedCount>0 ? li('&nbsp;&nbsp;parte efectivo', money(sm.mixedCash)) + li('&nbsp;&nbsp;parte tarjeta', money(sm.mixedCard)) : '')
+        + (sm.otherPay ? li('Sin forma de pago', money(sm.otherPay)) : '');
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cierre</title><style>
       @page { size: ${width}mm auto; margin: 0; }
       html,body{margin:0; padding:0; background:#fff;}
@@ -3233,19 +3314,22 @@
       <div>Turno del ${fmtDateOnly(c.periodStart)}</div>
       <div>Desde: ${fmtDateTime(c.periodStart)}</div>
       <div>Hasta: ${fmtDateTime(c.closedAt)}</div>
+      <div>Ventas: ${sm.count||0} · Promedio: ${money(sm.avg)}</div>
       <div class="hr"></div>
-      <table>
-        ${li('Ventas', sm.count||0)}
-        ${li('Ticket promedio', money(sm.avg))}
-        ${li('Efectivo', money(sm.cash))}
-        ${li('Tarjeta', money(sm.card))}
-        ${sm.eventTotal>0 ? li('Modo evento', money(sm.eventTotal)) : ''}
-      </table>
+      <div class="b">Producto vendido</div>
+      <table>${prodRows || '<tr><td>—</td><td></td></tr>'}</table>
+      ${legacy ? '' : `<div class="hr"></div><table>${li('Subtotal productos', money(sm.productsTotal))}${adjRow}</table>`}
       <div class="hr"></div>
       <table><tr class="b big"><td>TOTAL</td><td class="r">${money(sm.total)}</td></tr></table>
       <div class="hr"></div>
-      <div class="b">Más vendidos</div>
-      <table>${tops || '<tr><td>—</td><td></td></tr>'}</table>
+      <div class="b">Forma de pago</div>
+      <table>${payRows}</table>
+      <div class="hr"></div>
+      <table>
+        ${li('Total efectivo', money(sm.cash))}
+        ${li('Total tarjeta', money(sm.card))}
+        ${sm.eventTotal>0 ? li('Modo evento', money(sm.eventTotal)) : ''}
+      </table>
       <div class="hr"></div>
       <table>${li('Por cobrar pendiente', money(sm.pendingBalance))}</table>
     </body></html>`;
