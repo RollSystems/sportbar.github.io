@@ -920,6 +920,23 @@
   </div>
 </div>
 
+<!-- PEDIR UN TEXTO (nombre de cuenta) -->
+<div class="overlay" id="prompt-overlay">
+  <div class="modal" style="max-width:380px;">
+    <div class="modal-header"><h2 id="prompt-title">Nombre</h2></div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label id="prompt-label"></label>
+        <input type="text" id="prompt-input" maxlength="40" autocomplete="off">
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:flex-end; gap:10px;">
+      <button class="btn btn-ghost" id="btn-prompt-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="btn-prompt-ok">Guardar</button>
+    </div>
+  </div>
+</div>
+
 <!-- DIALOGO PROPIO (reemplaza alert/confirm nativos, bloqueados dentro del sandbox del artifact) -->
 <div class="overlay" id="dialog-overlay">
   <div class="modal" style="max-width:420px;">
@@ -1409,6 +1426,12 @@
   }
   function getActiveAccount(t){
     return (t.accounts||[]).find(a=>a.id===activeAccountId) || (t.accounts||[])[0];
+  }
+  // Nombre con que se identifica una cuenta en ventas, tickets y cuentas por cobrar:
+  // "Mesa 3 (Carlos)". Si la mesa tiene una sola cuenta con nombre por defecto, solo "Mesa 3".
+  function accountDisplayName(t, acc){
+    const custom = !/^Cuenta \d+$/.test(acc.label || '');
+    return (t.accounts.length > 1 || custom) ? `${t.name} (${acc.label})` : t.name;
   }
   function nextAccountLabel(t){
     let n = 1;
@@ -2175,7 +2198,15 @@
       const amt = orderTotal(acc.order);
       const tab = document.createElement('div');
       tab.className = 'account-tab' + (acc.id===activeAccountId ? ' active' : '');
-      tab.innerHTML = `<span>${acc.label}</span><span class="acc-amt">${money(amt)}</span>`;
+      tab.innerHTML = `<span>${escHtml(acc.label)}</span><span class="acc-amt">${money(amt)}</span>`;
+      if(acc.id===activeAccountId){
+        const ed = document.createElement('button');
+        ed.className = 'acc-remove';
+        ed.textContent = '✎';
+        ed.title = 'Cambiar nombre';
+        ed.addEventListener('click', (e)=>{ e.stopPropagation(); renameAccount(t, acc); });
+        tab.appendChild(ed);
+      }
       if(t.accounts.length>1 && (acc.order||[]).length===0){
         const rm = document.createElement('button');
         rm.className = 'acc-remove';
@@ -2199,7 +2230,10 @@
     addBtn.className = 'account-tab-add';
     addBtn.textContent = '+ Nueva cuenta';
     addBtn.addEventListener('click', async ()=>{
-      const newAcc = {id:uid(), label:nextAccountLabel(t), order:[]};
+      const def = nextAccountLabel(t);
+      const name = await showPromptDialog({ title:'Nueva cuenta', label:'Nombre de la cuenta (opcional)', value:def, confirmLabel:'Crear' });
+      if(name === null) return;
+      const newAcc = {id:uid(), label:(name.trim() || def), order:[]};
       t.accounts.push(newAcc);
       activeAccountId = newAcc.id;
       await saveTables();
@@ -2259,7 +2293,7 @@
       const now = Date.now();
       const dateStr = new Date(now).toLocaleDateString('es-GT',{day:'2-digit',month:'2-digit',year:'numeric'});
       const multi = t.accounts.length>1;
-      const label = multi ? `${t.name} (${acc.label})` : t.name;
+      const label = accountDisplayName(t, acc);
       if(delta>0){
         movements.push({id:uid(), ts:now, date:dateStr, productId, type:'venta', qty:-delta, ref:'Despacho a '+label});
       } else {
@@ -2329,7 +2363,7 @@
       renderAccountTabs(); populateOrderSelect(); renderOrderSummary();
       return;
     }
-    const label = multi ? `${t.name} (${acc.label})` : t.name;
+    const label = accountDisplayName(t, acc);
     const confirmMsg = `¿Deseas vaciar ${label}? El consumo (${money(total)}) quedará registrado como cuenta pendiente de cobro.`;
     const result = await showClearAccountDialog(confirmMsg);
     if(!result.confirmed) return;
@@ -2363,7 +2397,7 @@
     if(!acc.order || acc.order.length===0) return;
     const total = orderTotal(acc.order);
     const multi = t.accounts.length>1;
-    const label = multi ? `${t.name} (${acc.label})` : t.name;
+    const label = accountDisplayName(t, acc);
 
     const payment = await showPaymentDialog(total);
     if(!payment) return;
@@ -3334,6 +3368,40 @@
       <table>${li('Por cobrar pendiente', money(sm.pendingBalance))}</table>
     </body></html>`;
     printHtmlDocument(html);
+  }
+
+  // ---------- NOMBRE DE CUENTAS ----------
+  let promptResolve = null;
+  function showPromptDialog(opts){
+    return new Promise(resolve=>{
+      promptResolve = resolve;
+      document.getElementById('prompt-title').textContent = opts.title || 'Nombre';
+      document.getElementById('prompt-label').textContent = opts.label || '';
+      document.getElementById('btn-prompt-ok').textContent = opts.confirmLabel || 'Guardar';
+      const input = document.getElementById('prompt-input');
+      input.value = opts.value || '';
+      document.getElementById('prompt-overlay').classList.add('active');
+      setTimeout(()=>{ input.focus(); input.select(); }, 50);
+    });
+  }
+  function finishPrompt(value){
+    document.getElementById('prompt-overlay').classList.remove('active');
+    if(promptResolve){ const r = promptResolve; promptResolve = null; r(value); }
+  }
+  document.getElementById('btn-prompt-ok').addEventListener('click', ()=> finishPrompt(document.getElementById('prompt-input').value));
+  document.getElementById('btn-prompt-cancel').addEventListener('click', ()=> finishPrompt(null));
+  document.getElementById('prompt-input').addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter'){ e.preventDefault(); finishPrompt(document.getElementById('prompt-input').value); }
+  });
+
+  async function renameAccount(t, acc){
+    const name = await showPromptDialog({ title:'Nombre de la cuenta', label:'Nombre (ej. Carlos)', value:acc.label, confirmLabel:'Guardar' });
+    if(name === null) return;
+    const clean = name.trim();
+    if(!clean) return;
+    acc.label = clean;
+    await saveTables();
+    renderAccountTabs();
   }
 
   // ---------- CONFIGURACIÓN DEL NEGOCIO ----------
